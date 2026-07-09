@@ -1,0 +1,18 @@
+{
+  "protocol_version": "1.0",
+  "id": "t-sample-001",
+  "project_id": "ora-ops",
+  "title": "Seed the AAOS agent-registry.json",
+  "owner_agent": "claude-code",
+  "state": "queued",
+  "priority": 1,
+  "inputs": [
+    { "label": "Phase 1 schemas", "ref": "schemas/agent-registry.schema.json", "kind": "file" }
+  ],
+  "acceptance_criteria": [
+    "agent-registry.json exists at repo root",
+    "agent-registry.json validates against agent-registry.schema.json"
+  ],
+  "created_at": "2026-07-09T09:00:00-04:00",
+  "updated_at": "2026-07-09T09:00:00-04:00"
+}

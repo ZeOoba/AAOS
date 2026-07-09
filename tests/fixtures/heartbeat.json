@@ -1,0 +1,20 @@
+{
+  "protocol_version": "1.0",
+  "derived_at": "2026-07-09T09:30:00-04:00",
+  "agents": [
+    {
+      "agent_id": "claude-code",
+      "last_run": "2026-07-09T09:00:00-04:00",
+      "source": ["fleet-session-hook:session-state", "fleet-status.py:dual-fleet-health"],
+      "status": "fresh",
+      "threshold_hours": 4
+    },
+    {
+      "agent_id": "cowork",
+      "last_run": null,
+      "source": ["notion:35c6ecd8 last_edited_time", "automation-health-monitor:beacon-table"],
+      "status": "unknown",
+      "threshold_hours": 16
+    }
+  ]
+}

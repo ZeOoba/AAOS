@@ -1,0 +1,44 @@
+{
+  "protocol_version": "1.0",
+  "generated_by": "Claude Code, AAOS Phase 2 seed (2026-07-09)",
+  "agents": [
+    {
+      "id": "claude-code",
+      "surface": "Claude Code (local CLI, Windows workstation)",
+      "capabilities": ["filesystem", "git", "notion", "excel", "underwriting", "email-draft"],
+      "reachable_paths": [
+        "C:/Users/Owner/AAOS/**",
+        "C:/Users/Owner/OneDrive - Oxford Capital Partners/Claude_Workspace/**",
+        "C:/Users/Owner/.claude/**",
+        "C:/Users/Owner/ora-skills/**",
+        "C:/Users/Owner/oxford-command-center/**"
+      ],
+      "invocation_method": "Claude Code CLI session on the ORA workstation (interactive, or scheduled via the CC/MCP fleet).",
+      "write_scope": [
+        "C:/Users/Owner/AAOS/**",
+        "C:/Users/Owner/OneDrive - Oxford Capital Partners/Claude_Workspace/**",
+        "C:/Users/Owner/.claude/**",
+        "C:/Users/Owner/ora-skills/**",
+        "C:/Users/Owner/oxford-command-center/**"
+      ],
+      "heartbeat_source": ["fleet-session-hook:session-state", "fleet-status.py:dual-fleet-health"],
+      "active": true
+    },
+    {
+      "id": "cowork",
+      "surface": "Claude Cowork (cloud-hosted agent surface; interactive sessions and the LAMS/Cowork scheduled fleet)",
+      "capabilities": ["notion", "underwriting", "email-draft", "tenant-intelligence"],
+      "reachable_paths": [
+        "C:/Users/Owner/OneDrive - Oxford Capital Partners/Claude_Workspace/**",
+        "notion://**"
+      ],
+      "invocation_method": "Claude Cowork session (interactive, or scheduled via the LAMS/Cowork fleet).",
+      "write_scope": [
+        "C:/Users/Owner/OneDrive - Oxford Capital Partners/Claude_Workspace/**",
+        "notion://**"
+      ],
+      "heartbeat_source": ["notion:35c6ecd8 last_edited_time", "automation-health-monitor:beacon-table"],
+      "active": true
+    }
+  ]
+}

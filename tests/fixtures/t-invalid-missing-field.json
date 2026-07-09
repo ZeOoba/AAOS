@@ -1,0 +1,12 @@
+{
+  "protocol_version": "1.0",
+  "id": "t-sample-002",
+  "project_id": "ora-ops",
+  "title": "Task missing required acceptance_criteria",
+  "owner_agent": "claude-code",
+  "state": "queued",
+  "priority": 1,
+  "inputs": [],
+  "created_at": "2026-07-09T09:00:00-04:00",
+  "updated_at": "2026-07-09T09:00:00-04:00"
+}

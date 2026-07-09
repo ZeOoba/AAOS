@@ -1,0 +1,85 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://ora.internal/aaos/schemas/agent-registry.schema.json",
+  "title": "AAOS Agent Registry",
+  "description": "Static roster of AAOS agents. Exactly 2 entries (claude-code, cowork) are seeded later, not by this schema itself.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["protocol_version", "agents"],
+  "properties": {
+    "protocol_version": {
+      "type": "string",
+      "const": "1.0",
+      "description": "Protocol version. Consumer: tools/validate.py (rejects a mismatched major version with a pointer to docs/MIGRATIONS.md)."
+    },
+    "generated_by": {
+      "type": "string",
+      "description": "Human author note. Consumer: OPERATIONS.md reader."
+    },
+    "agents": {
+      "type": "array",
+      "description": "Static roster of agents. Consumer: tools/validate.py (registry-membership checks against every task/handoff/event actor reference), lease-task.py and post-handoff.py (agent resolution), COWORK-BOOTSTRAP.md dry-run, project-notion.py (row labels).",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "id",
+          "surface",
+          "capabilities",
+          "reachable_paths",
+          "invocation_method",
+          "write_scope",
+          "heartbeat_source",
+          "active"
+        ],
+        "properties": {
+          "id": {
+            "type": "string",
+            "pattern": "^[a-z][a-z0-9-]*$",
+            "description": "Open identifier, not an enum — onboarding agent #3+ must be possible by adding a registry entry alone, with no schema edit (Phase 1 design-review finding: an enum here contradicted the 'add one entry, nothing else changes' extensibility guarantee). Membership/existence checks against this id happen at tools/validate.py (registry-membership check), not in this schema. Consumer: lease-task.py owner match, post-handoff.py from/to resolution, every event actor."
+          },
+          "surface": {
+            "type": "string",
+            "description": "Consumer: project-notion.py row labels + human reader."
+          },
+          "capabilities": {
+            "type": "array",
+            "items": {
+              "type": "string",
+              "pattern": "^[a-z][a-z0-9-]*$"
+            },
+            "description": "Open vocabulary (not an enum), e.g. filesystem/git/notion/excel/underwriting/email-draft — a new agent may bring a capability string never seen before without a schema edit. Consumer: a human/agent choosing suggested_next_owner (advisory) + validate.py routing sanity."
+          },
+          "reachable_paths": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "Each a path/glob. Consumer: COWORK-BOOTSTRAP dry-run (verifies each path resolves) + validate.py seam sanity."
+          },
+          "invocation_method": {
+            "type": "string",
+            "description": "Consumer: OPERATIONS.md reader."
+          },
+          "write_scope": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "Each a path glob. The ownership boundary. Load-bearing field. Consumer: tools/validate.py — any handoff/task artifact path outside the poster's write_scope fails validation, loud flag."
+          },
+          "heartbeat_source": {
+            "type": "array",
+            "items": { "type": "string" },
+            "minItems": 1,
+            "description": "One or more upstream signals to project for this agent (e.g. cowork has two: the Notion heartbeat page's last_edited_time, and the automation-health-monitor beacon table — ADR-0005). Consumer: derive-heartbeat.py."
+          },
+          "active": {
+            "type": "boolean",
+            "description": "Consumer: expire-leases.py (an inactive agent's leases are always reclaimable)."
+          }
+        }
+      }
+    }
+  }
+}

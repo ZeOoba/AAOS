@@ -1,0 +1,13 @@
+{
+  "protocol_version": "2.0",
+  "id": "t-sample-004",
+  "project_id": "ora-ops",
+  "title": "Task declaring an unsupported protocol major version",
+  "owner_agent": "claude-code",
+  "state": "queued",
+  "priority": 1,
+  "inputs": [],
+  "acceptance_criteria": ["something happens"],
+  "created_at": "2026-07-09T09:00:00-04:00",
+  "updated_at": "2026-07-09T09:00:00-04:00"
+}

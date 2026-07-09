@@ -1,0 +1,15 @@
+{
+  "protocol_version": "1.0",
+  "id": "h-sample-traversal-inside",
+  "project_id": "ora-ops",
+  "task_ref": "t-sample-001",
+  "from_agent": "claude-code",
+  "to_agent": "cowork",
+  "artifact_manifest": [
+    { "path": "C:/Users/Owner/AAOS/foo/../bar.json", "sha256": "0000000000000000000000000000000000000000000000000000000000000000", "bytes": 7 }
+  ],
+  "context_summary": "Artifact path uses .. but still resolves inside the write_scope (foo/.. cancels out, leaving AAOS/bar.json). Must still be accepted.",
+  "required_next_action": "This should pass validate.py's write-scope check once the path is canonicalized before matching.",
+  "blockers": [],
+  "posted_at": "2026-07-09T09:31:00-04:00"
+}

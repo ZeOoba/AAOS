@@ -1,0 +1,56 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://ora.internal/aaos/schemas/heartbeat.schema.json",
+  "title": "AAOS Heartbeat Projection",
+  "description": "A DERIVED read-only projection — never independently emitted.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["protocol_version", "derived_at", "agents"],
+  "properties": {
+    "protocol_version": {
+      "type": "string",
+      "const": "1.0",
+      "description": "Protocol version. Consumer: tools/validate.py (rejects a mismatched major version with a pointer to docs/MIGRATIONS.md)."
+    },
+    "derived_at": {
+      "type": "string",
+      "format": "date-time",
+      "description": "Consumer: expire-leases.py (a stale projection is itself suspect) + project-notion.py STALE stamp."
+    },
+    "agents": {
+      "type": "array",
+      "description": "Consumer: expire-leases.py, projection.",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["agent_id", "last_run", "source", "status", "threshold_hours"],
+        "properties": {
+          "agent_id": {
+            "type": "string",
+            "description": "Consumer: expire-leases.py dead-agent decision, projection."
+          },
+          "last_run": {
+            "type": ["string", "null"],
+            "format": "date-time",
+            "description": "Nullable; null means unknown. Consumer: dead-agent logic."
+          },
+          "source": {
+            "type": "array",
+            "items": { "type": "string" },
+            "minItems": 1,
+            "description": "One or more upstream signals this projection was read from, e.g. [\"notion:35c6ecd8 last_edited_time\", \"automation-health-monitor:beacon-table\"] — an agent may have more than one upstream source (ADR-0005). Consumer: OPERATIONS.md traceability + audit that no new emitter was created."
+          },
+          "status": {
+            "type": "string",
+            "enum": ["fresh", "stale", "missed", "unknown"],
+            "description": "Consumer: expire-leases.py (only missed/unknown + expired lease triggers reclaim+escalate); projection color."
+          },
+          "threshold_hours": {
+            "type": "number",
+            "description": "The upstream's own threshold (e.g. 16 for cowork). Consumer: dead-agent logic + audit (shows the threshold was inherited, not invented)."
+          }
+        }
+      }
+    }
+  }
+}

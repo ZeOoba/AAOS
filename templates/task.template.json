@@ -1,0 +1,19 @@
+{
+  "protocol_version": "1.0",
+  "id": "t-template-example",
+  "project_id": "ora-ops",
+  "title": "Run the expire-leases sweep for projects/ora-ops",
+  "owner_agent": "unassigned",
+  "state": "queued",
+  "priority": 2,
+  "inputs": [
+    { "label": "Locks directory", "ref": "projects/ora-ops/locks/", "kind": "directory" }
+  ],
+  "acceptance_criteria": [
+    "Every lock past expires + 5 minutes grace is reclaimed",
+    "A LeaseExpired event is emitted for each reclaimed lock",
+    "Reclaimed task state is reset to queued, never deleted"
+  ],
+  "created_at": "2026-07-09T08:00:00-04:00",
+  "updated_at": "2026-07-09T08:00:00-04:00"
+}

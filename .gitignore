@@ -1,0 +1,16 @@
+# Python
+__pycache__/
+*.pyc
+.pytest_cache/
+
+# Editor/OS cruft
+.DS_Store
+Thumbs.db
+*.swp
+
+# Never accidentally track secrets or live coordination state in this codebase repo.
+# Live AAOS coordination state lives at the seam (Claude_Workspace\AAOS\), not here.
+*.env
+*.env.*
+*credentials*
+*.tmp

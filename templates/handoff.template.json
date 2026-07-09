@@ -1,0 +1,20 @@
+{
+  "protocol_version": "1.0",
+  "id": "h-template-example",
+  "project_id": "ora-ops",
+  "task_ref": "t-template-example",
+  "from_agent": "claude-code",
+  "to_agent": "cowork",
+  "artifact_manifest": [
+    {
+      "path": "C:/Users/Owner/AAOS/projects/ora-ops/events/aaos-events.ndjson",
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b85",
+      "bytes": 4096
+    }
+  ],
+  "context_summary": "expire-leases sweep reclaimed 1 stale lock (task t-template-example) and emitted a LeaseExpired event; queue is otherwise clear.",
+  "required_next_action": "Confirm the reclaimed task is safe to re-lease and pick it up if capacity allows.",
+  "blockers": [],
+  "suggested_next_owner": "cowork",
+  "posted_at": "2026-07-09T08:05:00-04:00"
+}

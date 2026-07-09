@@ -1,0 +1,15 @@
+{
+  "protocol_version": "1.0",
+  "id": "h-sample-traversal-escape",
+  "project_id": "ora-ops",
+  "task_ref": "t-sample-001",
+  "from_agent": "claude-code",
+  "to_agent": "cowork",
+  "artifact_manifest": [
+    { "path": "C:/Users/Owner/AAOS/../../Windows/System32/evil.dll", "sha256": "0000000000000000000000000000000000000000000000000000000000000000", "bytes": 13 }
+  ],
+  "context_summary": "Artifact path uses directory traversal to literally start with the write_scope prefix while resolving well outside it. Must be rejected.",
+  "required_next_action": "This should be rejected by validate.py as a write-scope violation once .. segments are resolved before glob matching.",
+  "blockers": [],
+  "posted_at": "2026-07-09T09:30:00-04:00"
+}

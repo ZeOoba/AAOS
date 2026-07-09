@@ -1,0 +1,149 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://ora.internal/aaos/schemas/task.schema.json",
+  "title": "AAOS Task",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "protocol_version",
+    "id",
+    "project_id",
+    "title",
+    "owner_agent",
+    "state",
+    "priority",
+    "inputs",
+    "acceptance_criteria",
+    "created_at",
+    "updated_at"
+  ],
+  "properties": {
+    "protocol_version": {
+      "type": "string",
+      "const": "1.0",
+      "description": "Protocol version. Consumer: tools/validate.py (rejects a mismatched major version with a pointer to docs/MIGRATIONS.md)."
+    },
+    "id": {
+      "type": "string",
+      "pattern": "^t-[a-z0-9-]+$",
+      "description": "Consumer: every queue script (filename↔id, lock filename, event refs), project-notion.py row key."
+    },
+    "project_id": {
+      "type": "string",
+      "description": "Consumer: all path resolution, project-notion.py grouping."
+    },
+    "title": {
+      "type": "string",
+      "maxLength": 120,
+      "description": "Consumer: human (Ops Hub row) + routing."
+    },
+    "owner_agent": {
+      "type": "string",
+      "description": "An agent id or the literal \"unassigned\". Consumer: lease-task.py first-lease eligibility, projection."
+    },
+    "state": {
+      "type": "string",
+      "enum": ["queued", "leased", "in-progress", "blocked", "done", "failed", "archived"],
+      "description": "Consumer: every queue script's state-machine guard, expire-leases.py, projection."
+    },
+    "priority": {
+      "type": "integer",
+      "enum": [1, 2, 3],
+      "description": "1=highest. Consumer: a leasing agent choosing next work; human triage."
+    },
+    "lease": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["holder", "acquired", "expires", "session"],
+      "description": "Optional; present iff state is \"leased\" or \"in-progress\" (business rule — not enforceable in JSON Schema alone). Consumer: lease-task.py / expire-leases.py / complete-task.py.",
+      "properties": {
+        "holder": {
+          "type": "string",
+          "description": "Consumer: lease-task.py / expire-leases.py / complete-task.py."
+        },
+        "acquired": {
+          "type": "string",
+          "format": "date-time",
+          "description": "Consumer: lease-task.py / expire-leases.py / complete-task.py."
+        },
+        "expires": {
+          "type": "string",
+          "format": "date-time",
+          "description": "Consumer: expire-leases.py clock."
+        },
+        "session": {
+          "type": "string",
+          "description": "Consumer: escalation evidence."
+        }
+      }
+    },
+    "inputs": {
+      "type": "array",
+      "description": "May be empty. Pointers only, never embedded data. Consumer: the executing agent fetches inputs.",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["label", "ref", "kind"],
+        "properties": {
+          "label": {
+            "type": "string",
+            "description": "Consumer: the executing agent fetches inputs."
+          },
+          "ref": {
+            "type": "string",
+            "description": "Consumer: the executing agent fetches inputs."
+          },
+          "kind": {
+            "type": "string",
+            "description": "Consumer: the executing agent fetches inputs."
+          }
+        }
+      }
+    },
+    "acceptance_criteria": {
+      "type": "array",
+      "minItems": 1,
+      "items": {
+        "type": "string"
+      },
+      "description": "Consumer: the executing agent + complete-task.py (each confirmed before done)."
+    },
+    "evidence": {
+      "type": "array",
+      "description": "Optional, but must be non-empty before state can be \"done\" (business rule — not enforceable in JSON Schema alone). Consumer: complete-task.py (\"evidence before done\") + human reviewer.",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["label", "ref"],
+        "properties": {
+          "label": {
+            "type": "string",
+            "description": "Consumer: complete-task.py (\"evidence before done\") + human reviewer."
+          },
+          "ref": {
+            "type": "string",
+            "description": "Consumer: complete-task.py (\"evidence before done\") + human reviewer."
+          }
+        }
+      }
+    },
+    "blocked_reason": {
+      "type": "string",
+      "description": "Optional; required in practice iff state==\"blocked\" (business rule — not enforceable in JSON Schema alone). Consumer: human triage, projection."
+    },
+    "created_at": {
+      "type": "string",
+      "format": "date-time",
+      "description": "Consumer: staleness checks, projection, ordering."
+    },
+    "updated_at": {
+      "type": "string",
+      "format": "date-time",
+      "description": "Consumer: staleness checks, projection, ordering."
+    },
+    "history_ref": {
+      "type": "string",
+      "description": "Pointer to the event log filtered by this id. Consumer: OPERATIONS.md human audit."
+    }
+  }
+}

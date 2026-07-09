@@ -1,0 +1,13 @@
+{
+  "protocol_version": "1.0",
+  "id": "t-sample-003",
+  "project_id": "ora-ops",
+  "title": "Task with an out-of-enum state value",
+  "owner_agent": "claude-code",
+  "state": "wandering",
+  "priority": 1,
+  "inputs": [],
+  "acceptance_criteria": ["something happens"],
+  "created_at": "2026-07-09T09:00:00-04:00",
+  "updated_at": "2026-07-09T09:00:00-04:00"
+}

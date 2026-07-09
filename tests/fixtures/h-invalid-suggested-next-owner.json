@@ -1,0 +1,16 @@
+{
+  "protocol_version": "1.0",
+  "id": "h-sample-suggested-owner-invalid",
+  "project_id": "ora-ops",
+  "task_ref": "t-sample-001",
+  "from_agent": "claude-code",
+  "to_agent": "cowork",
+  "artifact_manifest": [
+    { "path": "C:/Users/Owner/AAOS/agent-registry.json", "sha256": "9143d84b702fa5c1787795bc22a48039a9ed9c765fdcd0a7d7393603ca16b15", "bytes": 1868 }
+  ],
+  "context_summary": "suggested_next_owner is present but does not refer to any id in the agent registry. Must be rejected.",
+  "required_next_action": "Confirm suggested_next_owner registry-membership check rejects an unknown id.",
+  "blockers": [],
+  "suggested_next_owner": "ghost-agent",
+  "posted_at": "2026-07-09T09:33:00-04:00"
+}

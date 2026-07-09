@@ -1,0 +1,3 @@
+{"protocol_version":"1.0","event_id":"e-2026-07-09T09:00:00.000Z-1","type":"TaskCreated","actor":"claude-code","timestamp":"2026-07-09T09:00:00-04:00","project_id":"ora-ops","refs":{"task":"t-sample-001"}}
+{"protocol_version":"1.0","event_id":"e-2026-07-09T09:05:00.000Z-2","type":"TaskMadeUp","actor":"claude-code","timestamp":"2026-07-09T09:05:00-04:00","project_id":"ora-ops","refs":{}}
+{"protocol_version":"1.0","event_id":"e-2026-07-09T09:10:00.000Z-3","type":"TaskLeased","actor":"claude-code","timestamp":"2026-07-09T09:10:00-04:00","project_id":"ora-ops","refs":{"task":"t-sample-001"}}

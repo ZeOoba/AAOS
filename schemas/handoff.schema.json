@@ -1,0 +1,95 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://ora.internal/aaos/schemas/handoff.schema.json",
+  "title": "AAOS Handoff",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "protocol_version",
+    "id",
+    "project_id",
+    "task_ref",
+    "from_agent",
+    "to_agent",
+    "artifact_manifest",
+    "context_summary",
+    "required_next_action",
+    "blockers",
+    "posted_at"
+  ],
+  "properties": {
+    "protocol_version": {
+      "type": "string",
+      "const": "1.0",
+      "description": "Protocol version. Consumer: tools/validate.py (rejects a mismatched major version with a pointer to docs/MIGRATIONS.md)."
+    },
+    "id": {
+      "type": "string",
+      "pattern": "^h-[a-z0-9-]+$",
+      "description": "Consumer: post-handoff.py filename↔id, event refs."
+    },
+    "project_id": {
+      "type": "string",
+      "description": "Consumer: path resolution."
+    },
+    "task_ref": {
+      "type": "string",
+      "description": "A task id. Consumer: the receiving agent loads the task + validate.py (task must exist)."
+    },
+    "from_agent": {
+      "type": "string",
+      "description": "An agent id. Consumer: validate.py (write_scope enforced against this agent) + audit."
+    },
+    "to_agent": {
+      "type": "string",
+      "description": "An agent id. Consumer: the receiving agent (only it should lease) + projection."
+    },
+    "artifact_manifest": {
+      "type": "array",
+      "description": "May be empty. Consumer: validate.py (every path must be inside from_agent's write_scope — the colonization guard) + the receiver (verifies hashes before trusting artifacts).",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["path", "sha256", "bytes"],
+        "properties": {
+          "path": {
+            "type": "string",
+            "description": "Consumer: validate.py (every path must be inside from_agent's write_scope — the colonization guard) + the receiver (verifies hashes before trusting artifacts)."
+          },
+          "sha256": {
+            "type": "string",
+            "description": "Consumer: the receiver (verifies hashes before trusting artifacts)."
+          },
+          "bytes": {
+            "type": "integer",
+            "description": "Consumer: the receiver (verifies hashes before trusting artifacts)."
+          }
+        }
+      }
+    },
+    "context_summary": {
+      "type": "string",
+      "description": "≤300 words, pointer-first (word-count limit is a business rule; JSON Schema cannot count words — noted here in the description text only). Consumer: the receiving agent (briefing)."
+    },
+    "required_next_action": {
+      "type": "string",
+      "description": "Consumer: the receiving agent (what to do next)."
+    },
+    "blockers": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      },
+      "description": "May be empty; non-empty forces task.state=blocked (business rule). Consumer: post-handoff.py + human triage."
+    },
+    "suggested_next_owner": {
+      "type": "string",
+      "description": "Optional; an agent id from the registry. Consumer: the receiver/human; validate.py checks it's a real id but never enforces assignment (advisory, never binding)."
+    },
+    "posted_at": {
+      "type": "string",
+      "format": "date-time",
+      "description": "Consumer: staleness, ordering, projection."
+    }
+  }
+}

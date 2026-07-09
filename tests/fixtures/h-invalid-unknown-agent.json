@@ -1,0 +1,15 @@
+{
+  "protocol_version": "1.0",
+  "id": "h-sample-003",
+  "project_id": "ora-ops",
+  "task_ref": "t-sample-001",
+  "from_agent": "ghost-agent",
+  "to_agent": "cowork",
+  "artifact_manifest": [
+    { "path": "C:/Users/Owner/AAOS/agent-registry.json", "sha256": "9143d84b702fa5c1787795bc22a48039a9ed9c765fdcd0a7d7393603ca16b15", "bytes": 1868 }
+  ],
+  "context_summary": "from_agent does not exist in the registry at all.",
+  "required_next_action": "This should be rejected as a write-scope violation (unknown agent).",
+  "blockers": [],
+  "posted_at": "2026-07-09T09:25:00-04:00"
+}

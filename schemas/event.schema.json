@@ -1,0 +1,85 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://ora.internal/aaos/schemas/event.schema.json",
+  "title": "AAOS Event",
+  "description": "One event record. A live log is many of these, one per NDJSON line — this schema describes ONE record.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["protocol_version", "event_id", "type", "actor", "timestamp", "project_id", "refs"],
+  "properties": {
+    "protocol_version": {
+      "type": "string",
+      "const": "1.0",
+      "description": "Protocol version. Consumer: tools/validate.py (rejects a mismatched major version with a pointer to docs/MIGRATIONS.md)."
+    },
+    "event_id": {
+      "type": "string",
+      "pattern": "^e-[0-9TZ:.+-]+-[0-9]+$",
+      "description": "Consumer: dedupe, escalation evidence_ref, event_log.md milestone cross-ref."
+    },
+    "type": {
+      "type": "string",
+      "enum": [
+        "TaskCreated",
+        "TaskLeased",
+        "LeaseRenewed",
+        "LeaseExpired",
+        "LeaseDenied",
+        "LeaseContested",
+        "HandoffPosted",
+        "Blocked",
+        "Completed",
+        "Failed",
+        "HeartbeatMissed",
+        "Escalated",
+        "Archived"
+      ],
+      "description": "Consumer: expire-leases.py, project-notion.py, OPERATIONS.md state reconstruction."
+    },
+    "actor": {
+      "type": "string",
+      "description": "An agent id, or the literal \"system\" for the sweep. Consumer: audit, write_scope attribution."
+    },
+    "timestamp": {
+      "type": "string",
+      "format": "date-time",
+      "description": "Consumer: append order, staleness, replay."
+    },
+    "project_id": {
+      "type": "string",
+      "description": "Consumer: per-project log routing."
+    },
+    "refs": {
+      "type": "object",
+      "additionalProperties": false,
+      "description": "Consumer: project-notion.py + human audit (links event to objects).",
+      "properties": {
+        "task": {
+          "type": "string",
+          "description": "Consumer: project-notion.py + human audit (links event to objects)."
+        },
+        "handoff": {
+          "type": "string",
+          "description": "Consumer: project-notion.py + human audit (links event to objects)."
+        },
+        "lock": {
+          "type": "string",
+          "description": "Consumer: project-notion.py + human audit (links event to objects)."
+        },
+        "escalation": {
+          "type": "string",
+          "description": "Consumer: project-notion.py + human audit (links event to objects)."
+        }
+      }
+    },
+    "detail": {
+      "type": "string",
+      "maxLength": 200,
+      "description": "Optional; pointer-first, no embedded data. Consumer: human audit (why LeaseContested, etc.)."
+    },
+    "event_log_ref": {
+      "type": "string",
+      "description": "Optional; set only when a milestone event was mirrored to memory/event_log.md. Consumer: linkage-integrity check proving no duplication."
+    }
+  }
+}

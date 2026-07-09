@@ -1,0 +1,26 @@
+{
+  "protocol_version": "1.0",
+  "generated_by": "test fixture — tests/fixtures/agent-registry.json (independent of production agent-registry.json)",
+  "agents": [
+    {
+      "id": "claude-code",
+      "surface": "Claude Code (test fixture)",
+      "capabilities": ["filesystem", "git"],
+      "reachable_paths": ["C:/Users/Owner/AAOS/**"],
+      "invocation_method": "test fixture",
+      "write_scope": ["C:/Users/Owner/AAOS/**"],
+      "heartbeat_source": ["test:claude-code-signal"],
+      "active": true
+    },
+    {
+      "id": "cowork",
+      "surface": "Claude Cowork (test fixture)",
+      "capabilities": ["notion"],
+      "reachable_paths": ["notion://**"],
+      "invocation_method": "test fixture",
+      "write_scope": ["C:/Users/Owner/OneDrive - Oxford Capital Partners/Claude_Workspace/**"],
+      "heartbeat_source": ["test:cowork-signal"],
+      "active": true
+    }
+  ]
+}

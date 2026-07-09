@@ -1,0 +1,16 @@
+{
+  "protocol_version": "1.0",
+  "id": "h-sample-002",
+  "project_id": "ora-ops",
+  "task_ref": "t-sample-001",
+  "from_agent": "claude-code",
+  "to_agent": "cowork",
+  "artifact_manifest": [
+    { "path": "C:/Users/Owner/AAOS/agent-registry.json", "sha256": "9143d84b702fa5c1787795bc22a48039a9ed9c765fdcd0a7d7393603ca16b15", "bytes": 1868 },
+    { "path": "C:/Users/Owner/other-repo/secret.json", "sha256": "0000000000000000000000000000000000000000000000000000000000000000", "bytes": 42 }
+  ],
+  "context_summary": "Otherwise-valid handoff whose second artifact path falls outside from_agent's declared write_scope.",
+  "required_next_action": "This should be rejected by validate.py as a write-scope violation.",
+  "blockers": [],
+  "posted_at": "2026-07-09T09:20:00-04:00"
+}

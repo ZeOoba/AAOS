@@ -1,0 +1,24 @@
+{
+  "protocol_version": "1.0",
+  "id": "t-sample-001",
+  "project_id": "ora-ops",
+  "title": "Seed AAOS agent-registry.json with the claude-code and cowork entries",
+  "owner_agent": "claude-code",
+  "state": "done",
+  "priority": 1,
+  "inputs": [
+    { "label": "Agent registry schema", "ref": "schemas/agent-registry.schema.json", "kind": "file" },
+    { "label": "ADR-0002 transport mechanics", "ref": "docs/adr/0002-transport-mechanics.md", "kind": "file" }
+  ],
+  "acceptance_criteria": [
+    "agent-registry.json exists at the repo root with exactly 2 entries (claude-code, cowork)",
+    "Both entries validate against agent-registry.schema.json",
+    "Each entry's write_scope matches its actual filesystem/Notion reach"
+  ],
+  "evidence": [
+    { "label": "validate.py run against agent-registry.json", "ref": "VALID: C:/Users/Owner/AAOS/agent-registry.json" }
+  ],
+  "created_at": "2026-07-09T07:00:00-04:00",
+  "updated_at": "2026-07-09T07:30:00-04:00",
+  "history_ref": "projects/ora-ops/events/aaos-events.ndjson#t-sample-001"
+}
