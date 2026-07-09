@@ -39,7 +39,8 @@ this schema-inference table is derived from, and docs/AAOS-SPEC.md §6
      at least one of the handoff's from_agent's write_scope globs, as
      declared in the agent registry (default: agent-registry.json at the
      repo root; override with --registry). Glob matching uses
-     fnmatch.fnmatch (documented choice — see match_write_scope() below)
+     fnmatch.fnmatch (documented choice — see match_write_scope() in
+     _aaos_common.py, its single home since the Phase 3 lift)
      after normalizing both the candidate path and the glob pattern to
      forward slashes, since write_scope globs in this project are always
      authored with forward slashes (e.g. "C:/Users/Owner/AAOS/**") even on
@@ -64,13 +65,13 @@ Exit codes:
 from __future__ import annotations
 
 import argparse
-import fnmatch
 import json
-import posixpath
 import sys
 from pathlib import Path
 
 from jsonschema import Draft202012Validator
+
+from _aaos_common import match_write_scope  # single home (Phase 3 lift, PHASE3-DESIGN.md §1.1)
 
 SCRIPT_DIR = Path(__file__).resolve().parent
 REPO_ROOT = SCRIPT_DIR.parent
@@ -167,41 +168,11 @@ def load_registry(registry_path: Path):
         return json.load(fh)
 
 
-def match_write_scope(candidate_path: str, write_scope) -> bool:
-    """True if candidate_path is covered by at least one glob in write_scope.
-
-    Uses fnmatch.fnmatch (not pathlib.PurePath.match) because write_scope
-    globs use "**" to mean "this directory and everything under it,
-    recursively" (see agent-registry.json, e.g. "C:/Users/Owner/AAOS/**").
-    fnmatch treats "*" (and so "**") as matching any run of characters
-    including path separators, which is exactly that recursive semantics;
-    PurePath.match treats "**" as an ordinary single-segment "*" and would
-    require multiple pattern segments to express the same thing.
-
-    Before matching, candidate_path is canonicalized: normalized to forward
-    slashes (this project always authors write_scope globs with forward
-    slashes even for Windows paths) and then run through posixpath.normpath
-    to lexically resolve "." / ".." segments and collapse redundant
-    separators. This is load-bearing, not cosmetic: fnmatch.fnmatch is a
-    pure string match with no notion of path semantics, so without
-    canonicalizing first, a traversal path like
-    "C:/Users/Owner/AAOS/../../Windows/System32/evil.dll" would satisfy the
-    glob "C:/Users/Owner/AAOS/**" merely because it *starts with* that
-    literal prefix, even though it resolves well outside the scoped
-    directory. posixpath (rather than os.path) is used deliberately so this
-    resolution is platform-independent — write_scope globs are an internal,
-    always-forward-slash convention, not literal OS paths, and normpath's
-    ".."-collapsing is purely lexical either way (no filesystem/symlink
-    resolution occurs, nor is any needed here).
-    """
-    norm_candidate = posixpath.normpath(candidate_path.replace("\\", "/"))
-    for pattern in write_scope:
-        if not isinstance(pattern, str):
-            continue
-        norm_pattern = pattern.replace("\\", "/")
-        if fnmatch.fnmatch(norm_candidate, norm_pattern):
-            return True
-    return False
+# match_write_scope lives in _aaos_common (imported above) — lifted there in
+# Phase 3 per PHASE3-DESIGN.md §1.1 so exactly one traversal-safe
+# implementation exists. Its full rationale docstring (fnmatch-over-PurePath,
+# posixpath.normpath canonicalization as the Gate-2 traversal-bypass fix)
+# moved with it.
 
 
 def check_write_scope(handoff: dict, registry, registry_path: Path) -> list[str]:
