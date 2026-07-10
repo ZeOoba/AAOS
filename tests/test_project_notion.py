@@ -351,6 +351,25 @@ class EmptyProjectTests(BaseProjectNotionTest):
         self.assertEqual(doc["rows"], [])
 
 
+class SeamUnavailableTests(BaseProjectNotionTest):
+    def test_nonexistent_seam_root_fails_closed_not_empty_success(self):
+        # Gate-5 review Minor #3: this tool's inputs (tasks/, events log,
+        # heartbeat.json) are always seam-rooted -- a phantom seam must not
+        # silently produce an empty-but-"successful" projection (rows:[],
+        # exit 0), which would misrepresent an unreachable seam as a
+        # genuinely empty, current project.
+        phantom = self.root / "does-not-exist"
+        out = self._out_path()
+        code, output = run_pn(
+            "--project", PROJECT, "--out", str(out), "--now", NOW_ISO,
+            "--seam-root", str(phantom),
+        )
+        self.assertEqual(code, 2, output)
+        self.assertIn("seam root unreachable", output)
+        self.assertFalse(out.exists(), "no projection file should be written for an unreachable seam")
+        self.assertFalse(phantom.exists(), "the phantom seam root itself must not be auto-created")
+
+
 # ---------------------------------------------------------------------------
 # heartbeat.json absent -> every task's heartbeat_status = unknown
 # ---------------------------------------------------------------------------

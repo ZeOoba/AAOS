@@ -649,6 +649,56 @@ class PostHandoffBlockerTests(PostHandoffTestBase):
         self.assertEqual(task["blocked_reason"], "waiting on lender docs")
         self.assertEqual(self.event_types(), ["HandoffPosted", "Blocked"])
 
+    def test_blocking_drops_lease_and_archives_live_lock(self):
+        # Gate-5 independent-review Issue 1 regression: a blocked task must
+        # not keep carrying a lease (task.schema.json's own invariant is
+        # "lease present iff state is leased or in-progress") -- otherwise
+        # a dead agent's lock on a now-blocked task is unreclaimable
+        # forever, since expire-leases.py only re-examines locks whose task
+        # is leased/in-progress. This test seeds a REAL lock file on disk
+        # (not just the task's `lease` field), matching what a genuine
+        # lease-task.py call would have created, so the archive assertion
+        # below actually exercises the fix rather than a no-op.
+        lease = _live_lease()
+        self.seed_task("t-handoff-block-drops-lease", state="leased", lease=lease)
+        lock_file = aaos.lock_path("t-handoff-block-drops-lease", PROJECT, root=str(self.root))
+        lock_file.parent.mkdir(parents=True, exist_ok=True)
+        lock_file.write_text(json.dumps({
+            "protocol_version": "1.0",
+            "task_ref": "t-handoff-block-drops-lease",
+            "holder": lease["holder"], "session": lease["session"],
+            "acquired": lease["acquired"], "expires": lease["expires"],
+        }), encoding="utf-8")
+
+        artifact = self.make_in_scope_artifact()
+        code, out = self.run_tool(
+            "post-handoff.py",
+            "--id", "h-block-drops-lease", "--task", "t-handoff-block-drops-lease",
+            "--from", "claude-code", "--to", "cowork",
+            "--next-action", "unblock me", "--summary", "s",
+            "--artifact", f"path={artifact}",
+            "--blocker", "waiting on lender docs",
+            "--holder", "claude-code", "--session", "sess-1",
+            "--now", _iso(NOW),
+        )
+        self.assertEqual(code, 0, out)
+
+        task = self.reload_task("t-handoff-block-drops-lease")
+        self.assertEqual(task["state"], "blocked")
+        self.assertNotIn("lease", task, "blocked task must not carry a lease (schema invariant)")
+
+        self.assertFalse(lock_file.exists(), "lock must no longer be live once the task is blocked")
+        archived = list((lock_file.parent / "_archive").glob("t-handoff-block-drops-lease.*.lock"))
+        self.assertEqual(len(archived), 1, "lock must be archived, not deleted, when blocking releases it")
+
+        # And the property this whole fix exists for: expire-leases.py must
+        # not (mis)report this as "already reclaimed by a concurrent
+        # sweep" -- there is no live lock left to even consider.
+        code2, out2 = self.run_tool("expire-leases.py", "--now", _iso(NOW))
+        self.assertEqual(code2, 0, out2)
+        self.assertNotIn("SKIP", out2)
+        self.assertEqual(self.reload_task("t-handoff-block-drops-lease")["state"], "blocked")
+
     def test_blocker_with_lost_lease_exits_4(self):
         self.seed_task("t-handoff-blocked-lost", state="leased", lease=_live_lease(holder="claude-code", session="sess-1"))
         artifact = self.make_in_scope_artifact()

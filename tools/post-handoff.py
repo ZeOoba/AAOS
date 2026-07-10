@@ -173,6 +173,13 @@ def main(argv=None) -> int:
                 new_task["state"] = "blocked"
                 new_task["blocked_reason"] = blocked_reason
                 new_task["updated_at"] = resolved_now.isoformat()
+                # Gate-5 review Issue 1: task.schema.json's own invariant is
+                # "lease present iff state is leased or in-progress" -- a
+                # blocked task must not carry a lease. Drop it here so a
+                # dead agent's lock on a now-blocked task is not left
+                # unreclaimable forever (expire-leases.py only re-examines
+                # locks whose task is leased/in-progress).
+                new_task.pop("lease", None)
 
                 errors = aaos.validate_obj(new_task, "task")
                 if errors:
@@ -186,6 +193,11 @@ def main(argv=None) -> int:
                     },
                     root=args.seam_root,
                 )
+
+                lock_file = aaos.lock_path(args.task_ref, args.project, root=args.seam_root)
+                if lock_file.exists():
+                    aaos.archive_lock(lock_file, now=resolved_now)
+
                 print(f"BLOCKED: {args.task_ref} (event {blocked_event_id})")
 
         return 0

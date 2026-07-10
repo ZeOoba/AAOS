@@ -44,7 +44,7 @@
     "state": {
       "type": "string",
       "enum": ["queued", "leased", "in-progress", "blocked", "done", "failed", "archived"],
-      "description": "Consumer: every queue script's state-machine guard, expire-leases.py, projection."
+      "description": "Consumer: every queue script's state-machine guard, expire-leases.py, projection. Note: \"in-progress\" is reserved (accepted/reasoned-about by every consumer alongside \"leased\") but no v1 tool ever writes it -- lease-task.py only ever sets \"leased\". A future finer-grained \"work has actually started\" transition can use it without a schema change."
     },
     "priority": {
       "type": "integer",

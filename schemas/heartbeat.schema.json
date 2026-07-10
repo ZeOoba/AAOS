@@ -43,7 +43,7 @@
           "status": {
             "type": "string",
             "enum": ["fresh", "stale", "missed", "unknown"],
-            "description": "Consumer: expire-leases.py (only missed/unknown + expired lease triggers reclaim+escalate); projection color."
+            "description": "Consumer: expire-leases.py (does not gate reclamation -- expiry alone does; this only classifies an expiry-based reclaim as DeadAgent [missed/unknown, escalate] vs ExpiredLapsed [fresh/stale, routine]); projection color."
           },
           "threshold_hours": {
             "type": "number",

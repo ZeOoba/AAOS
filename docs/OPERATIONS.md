@@ -57,7 +57,8 @@ Use this when a lock looks stuck — past its `expires` time, holder unresponsiv
 1. **Locate the lock.** `locks\<task-id>.lock` (JSON: `protocol_version`, `task_ref`, `holder`, `acquired`, `expires`, `session`).
 2. **Confirm it's genuinely expired**, not just old-looking:
    - Check `expires` against the current time — it must be past `expires` **plus the 5-minute clock-skew grace** (ADR-0003) before it's reclaimable at all.
-   - Check the holder's status: look up `heartbeat.json` (the derived heartbeat projection, one row per `agent_id`) and find the entry for `lock.holder`. Per ADR-0003, a lock is only reclaimable when the holder's heartbeat `status` is `missed` or `unknown` — or the lock is simply past grace with no `LeaseRenewed` event on record for it in `events\aaos-events.ndjson`. A `fresh` or `stale`-but-still-ticking holder is not grounds to steal the lock; when in doubt, this is the fail-closed case from ADR-0003 — escalate to a human rather than proceeding, which for you as the human means: wait, or contact the holder directly, don't reclaim yet.
+   - Reclamation itself is gated on expiry alone — `now > expires + 5 minutes` with no `LeaseRenewed` event on record is sufficient, full stop; you do not need to also check the heartbeat before reclaiming. (An active holder is expected to renew before expiry for genuinely long jobs, per ADR-0003 — a past-grace lock with no renewal means either the job finished without releasing it, or the holder is gone.)
+   - The heartbeat matters for a second, separate question — *how* to log the reclaim, not *whether* to do it. Look up `heartbeat.json` (the derived heartbeat projection, one row per `agent_id`) and find the entry for `lock.holder`: `missed`/`unknown` → this is a `DeadAgent`-class reclaim, worth an escalation note; `fresh`/`stale` → routine `ExpiredLapsed` reclaim, no escalation needed. Either way, proceed with the reclaim below — the classification only changes how loudly you flag it.
 3. **Move the lock file — never delete it.** Move (don't copy-then-delete; an actual move) `locks\<task-id>.lock` to:
    ```
    locks\_archive\<task-id>.<timestamp>.lock
@@ -75,7 +76,7 @@ This is a manual stand-in for the automated sweep's reclaim path (ADR-0003: move
 
 The general "never delete" rule applied to a task. Appropriate when a task is `done`, has been abandoned/superseded, or otherwise needs to come out of the active view without destroying its history.
 
-1. **Set the task to its terminal archived state first.** Edit `tasks\<task-id>.json`, set `state` to `"archived"`, and write it via the same atomic write-rename convention as §2 (write `.tmp`, then rename over the live file). Do this before moving the file, so the last live-directory copy of the task correctly reflects its final state.
+1. **Set the task to its terminal archived state first.** Edit `tasks\<task-id>.json`, set `state` to `"archived"`, and write it via the same atomic write-rename convention as §2 (write `.tmp`, then rename over the live file). Do this before moving the file, so the last live-directory copy of the task correctly reflects its final state. **If the task still carries a `lease` object** (you're archiving a `leased`/`in-progress` task, not just a `done` one — this is the Phase 5 "rollback drill" case), drop the `lease` field as part of this same write: an `archived` task must never carry a lease (same rule as `blocked`, per `task.schema.json`'s "lease present iff leased/in-progress" invariant).
 2. **Move the task file out of the live directory**, mirroring the same `_archive` convention already established for locks:
    ```
    tasks\_archive\<task-id>.json

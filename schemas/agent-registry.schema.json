@@ -76,7 +76,7 @@
           },
           "active": {
             "type": "boolean",
-            "description": "Consumer: expire-leases.py (an inactive agent's leases are always reclaimable)."
+            "description": "Consumer: derive-heartbeat.py (an inactive agent's heartbeat status is forced to unknown regardless of signal data). NOT consumed by expire-leases.py directly -- reclamation is expiry-based, independent of this flag; an inactive agent's expired lease is reclaimed the same way any expired lease is."
           }
         }
       }

@@ -148,16 +148,22 @@ def main(argv=None) -> int:
                 continue
 
             # Pre-check (Finding 3a, adversarial review): reclaim_decision
-            # was computed from the LOCK file alone. If a fully-concurrent
-            # sweep has already won the race and committed its own reclaim
-            # (task -> queued, lease dropped) between then and this load,
-            # the task on disk right now no longer reflects a live lease --
-            # proceeding would emit a redundant LeaseExpired for a lease
-            # that's already gone. Skip silently: no event, no state churn.
+            # was computed from the LOCK file alone. Between then and this
+            # load, the task's lease can legitimately have gone away for
+            # more than one reason -- a fully-concurrent sweep already won
+            # the race and reclaimed it (task -> queued, lease dropped), or
+            # post-handoff.py transitioned it to "blocked" (which also
+            # drops the lease, per task.schema.json's "lease present iff
+            # leased/in-progress" invariant). Either way, proceeding here
+            # would emit a redundant/incorrect LeaseExpired for a lease
+            # that's already gone -- skip silently: no event, no state
+            # churn. Don't assert which of the (possibly several) causes
+            # applies; we haven't verified that, only that the lease itself
+            # is no longer live.
             if task.get("state") not in ("leased", "in-progress") or "lease" not in task:
                 print(
-                    f"SKIP: {task_id} no longer leased (state={task.get('state')!r}); "
-                    "already reclaimed by a concurrent sweep"
+                    f"SKIP: {task_id} lease no longer live (state={task.get('state')!r}); "
+                    "reclaimed or transitioned by another operation since this lock was read"
                 )
                 continue
 

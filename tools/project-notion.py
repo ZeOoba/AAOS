@@ -248,6 +248,11 @@ def main(argv=None) -> int:
         now = aaos._now(None)
 
     try:
+        # Gate-5 review Minor #3: every input this tool reads (tasks/,
+        # events log, heartbeat.json) is seam-rooted regardless of --out,
+        # so a phantom seam must fail closed here, not auto-vivify an
+        # empty (and misleadingly stale:false) projection at exit 0.
+        aaos.require_seam_reachable(args.seam_root)
         project_dir = aaos.project_dir(args.project, root=args.seam_root)
     except aaos.UsageError as exc:
         print(f"USAGE ERROR: {exc}")

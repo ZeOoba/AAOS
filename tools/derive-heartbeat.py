@@ -301,7 +301,20 @@ def main(argv=None) -> int:
             print(f"  {e}")
         return 1
 
-    out_path = Path(args.out) if args.out else aaos.heartbeat_path(root=args.seam_root)
+    if args.out:
+        out_path = Path(args.out)
+    else:
+        # Gate-5 review Minor #3: this tool's INPUT (--signals) is never
+        # seam-rooted, so only gate the seam here -- at the point we're
+        # about to default to writing INTO the seam's heartbeat.json. A
+        # phantom seam must fail closed rather than auto-vivify a stray
+        # heartbeat.json in a brand-new parallel tree at exit 0.
+        try:
+            aaos.require_seam_reachable(args.seam_root)
+        except aaos.UsageError as exc:
+            print(f"USAGE ERROR: {exc}")
+            return 2
+        out_path = aaos.heartbeat_path(root=args.seam_root)
     aaos.save_json(out_path, heartbeat)
     print(str(out_path))
     return 0

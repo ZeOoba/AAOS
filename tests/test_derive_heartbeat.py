@@ -494,6 +494,36 @@ class AtomicWriteResidueTests(BaseDeriveHeartbeatTest):
         self.assertTrue(expected.exists())
         self.assertIn(str(expected), output)
 
+    def test_nonexistent_seam_root_fails_closed_when_defaulting_out_path(self):
+        # Gate-5 review Minor #3: --signals is never seam-rooted, so this
+        # tool only needs to fail closed at the point it's about to default
+        # to writing INTO the seam's heartbeat.json -- a phantom seam must
+        # not silently auto-vivify a stray heartbeat.json there at exit 0.
+        signals = {"agents": []}
+        path = self._write_signals(signals)
+        phantom = self.root / "does-not-exist"
+        code, output = run_dh(
+            "--signals", str(path), "--now", NOW_ISO, "--seam-root", str(phantom),
+        )
+        self.assertEqual(code, 2, output)
+        self.assertIn("seam root unreachable", output)
+        self.assertFalse(phantom.exists(), "the phantom seam root itself must not be auto-created")
+
+    def test_explicit_out_path_still_works_against_nonexistent_seam_root(self):
+        # The --out override is legitimately allowed to point off-seam
+        # (design section 4.1) -- an unreachable default SEAM_ROOT must not
+        # block a caller who explicitly named a real, different output path.
+        signals = {"agents": []}
+        path = self._write_signals(signals)
+        phantom = self.root / "does-not-exist"
+        out = self._out_path()
+        code, output = run_dh(
+            "--signals", str(path), "--now", NOW_ISO,
+            "--seam-root", str(phantom), "--out", str(out),
+        )
+        self.assertEqual(code, 0, output)
+        self.assertTrue(out.exists())
+
 
 if __name__ == "__main__":
     unittest.main()
