@@ -28,7 +28,9 @@ deliberately NOT pre-validated/duplicated here.
 
 Exit codes: see docs/PHASE3-DESIGN.md section 0.4.
     0 success (drain-only or emit; never idempotent-skipped)
-    2 usage error (missing --type/--actor when not --drain-only)
+    2 usage error (missing --type/--actor when not --drain-only; or the
+      seam root itself is unreachable -- Phase 5 scenario #4, see
+      aaos.require_seam_reachable)
     5 event-commit failure (includes: constructed event fails schema validation)
 """
 from __future__ import annotations
@@ -81,6 +83,7 @@ def main(argv=None) -> int:
     resolved_now = _resolve_now(args.now)
 
     try:
+        aaos.require_seam_reachable(args.seam_root)
         if args.drain_only:
             n = aaos.drain_event_spool(args.project, root=args.seam_root, now=resolved_now)
             print(f"DRAINED: {n} spooled event(s)")

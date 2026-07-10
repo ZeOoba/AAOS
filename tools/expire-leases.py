@@ -36,6 +36,10 @@ per-lock sweep; it returns 0 unless a genuine systemic failure (schema
 validation on a reclaim, or an event-commit failure) propagates.
     0 success (sweep completed; dry-run always 0)
     1 schema/validation error on a reclaimed task
+    2 usage error (Phase 5, scenario #4: seam root itself unreachable --
+      see aaos.require_seam_reachable; previously this silently returned 0
+      "no locks directory; nothing to sweep" even when the whole seam was
+      gone, masking a broken seam as a clean empty sweep)
     5 event-commit failure
 """
 from __future__ import annotations
@@ -98,6 +102,7 @@ def main(argv=None) -> int:
     resolved_now = _resolve_now(args.now)
 
     try:
+        aaos.require_seam_reachable(args.seam_root)
         if not args.dry_run:
             # Gated behind dry-run (Finding 4, adversarial review): draining
             # is a real write (folds spooled events into the NDJSON) --

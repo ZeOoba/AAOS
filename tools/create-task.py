@@ -112,6 +112,7 @@ def main(argv=None) -> int:
     resolved_now = _resolve_now(args.now)
 
     try:
+        aaos.require_seam_reachable(args.seam_root)
         task_id = _build_task_id(args, resolved_now)
 
         if not args.accept:

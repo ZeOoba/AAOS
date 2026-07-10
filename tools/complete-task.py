@@ -109,6 +109,7 @@ def main(argv=None) -> int:
     resolved_now = _resolve_now(args.now)
 
     try:
+        aaos.require_seam_reachable(args.seam_root)
         task = aaos.load_task(args.task_id, args.project, root=args.seam_root)
 
         if task.get("state") == "archived":

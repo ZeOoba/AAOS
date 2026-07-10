@@ -185,6 +185,35 @@ def seam_root(override: str | None = None) -> Path:
     return Path(DEFAULT_SEAM_ROOT)
 
 
+def require_seam_reachable(root: str | None = None) -> Path:
+    """Fail closed with UsageError if the seam root itself does not exist
+    as a directory. Every AAOS CLI script that touches seam-rooted state
+    must call this FIRST, before any other seam read/write.
+
+    Added in Phase 5 (failure-injection matrix, scenario #4 "seam
+    unavailable"). Without this check, a script that has no other reason
+    to read anything at the seam before it first writes (create-task.py;
+    post-handoff.py with no --blocker; emit-event.py) would silently
+    auto-vivify a brand-new, empty parallel seam tree and SUCCEED when
+    pointed at a renamed/unmounted OneDrive sync folder, instead of
+    failing closed the way every other AAOS operation does when its
+    precondition isn't met -- atomic_write's os.makedirs(path.parent,
+    exist_ok=True) has no notion that a missing seam ROOT is different
+    from a missing subdirectory that's fine to auto-create on first use.
+    Empirically confirmed via the Phase 5 rehearsal: see
+    docs/_task-reports/phase5-failure-matrix-report.md, scenario #4.
+    """
+    resolved = seam_root(root)
+    if not resolved.is_dir():
+        raise UsageError(
+            f"seam root unreachable: '{resolved}' does not exist or is not "
+            "a directory. This usually means the OneDrive sync folder is "
+            "unmounted or renamed, or --seam-root/AAOS_SEAM_ROOT is wrong "
+            "-- fix the seam, don't work around this check."
+        )
+    return resolved
+
+
 def project_dir(project_id: str, *, root: str | None = None) -> Path:
     _validate_project_id(project_id)
     return seam_root(root) / "projects" / project_id

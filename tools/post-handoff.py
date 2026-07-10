@@ -113,6 +113,7 @@ def main(argv=None) -> int:
     resolved_now = _resolve_now(args.now)
 
     try:
+        aaos.require_seam_reachable(args.seam_root)
         summary = args.summary
         if summary is None and args.summary_file:
             summary_path = Path(args.summary_file)
