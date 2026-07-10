@@ -82,7 +82,7 @@ def main(argv=None) -> int:
 
     try:
         if args.drain_only:
-            n = aaos.drain_event_spool(args.project, root=args.seam_root)
+            n = aaos.drain_event_spool(args.project, root=args.seam_root, now=resolved_now)
             print(f"DRAINED: {n} spooled event(s)")
             return 0
 

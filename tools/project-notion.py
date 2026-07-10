@@ -137,27 +137,20 @@ def _load_tasks(tasks_dir: Path):
     return rows_input, skipped, newest, file_count
 
 
-def _latest_event_per_task(events_path: Path):
+def _latest_event_per_task(project_id: str, root: str | None):
     """Return {task_id: {"type", "timestamp"}} for the newest event
     (by parsed timestamp) referencing each task_id, matched on refs.task.
-    A malformed NDJSON line is skipped -- it can't crash the projection."""
+
+    Reads via aaos.read_events (NDJSON + not-yet-drained pending events,
+    deduped by event_id) rather than parsing the NDJSON file directly --
+    see docs/PHASE3-DESIGN.md section 1.10 REVISED: a committed-but-still-
+    pending event is a real event and must not be invisible to this
+    projection just because no drain has folded it in yet. A malformed
+    entry (missing/unparseable timestamp) is skipped -- it can't crash the
+    projection."""
     latest: dict[str, tuple[datetime, dict]] = {}
-    if not events_path.exists():
-        return {}
 
-    try:
-        raw = events_path.read_text(encoding="utf-8")
-    except OSError:
-        return {}
-
-    for line in raw.splitlines():
-        line = line.strip()
-        if not line:
-            continue
-        try:
-            event = json.loads(line)
-        except json.JSONDecodeError:
-            continue
+    for event in aaos.read_events(project_id, root=root):
         if not isinstance(event, dict):
             continue
         task_id = event.get("refs", {}).get("task") if isinstance(event.get("refs"), dict) else None
@@ -265,7 +258,7 @@ def main(argv=None) -> int:
     hb_path = aaos.heartbeat_path(root=args.seam_root)
 
     tasks_input, skipped, newest_task_mtime, task_file_count = _load_tasks(tasks_dir)
-    last_events = _latest_event_per_task(events_path)
+    last_events = _latest_event_per_task(args.project, args.seam_root)
     heartbeat_doc = aaos.load_heartbeat(root=args.seam_root)
     heartbeat_lookup = _heartbeat_status_lookup(heartbeat_doc)
 

@@ -12,6 +12,8 @@ Run with:  python -m unittest tests.test_aaos_common -v   (from the repo root)
 """
 from __future__ import annotations
 
+import contextlib
+import io
 import json
 import os
 import shutil
@@ -277,9 +279,16 @@ class AcquireLeaseContestedTests(BaseAaosTest):
         locks_dir = aaos.lock_path(task_id, PROJECT, root=str(self.root)).parent
 
         def fake_sleep(seconds):
+            # A real OneDrive conflict-copy is a literal content duplicate
+            # of the original lock file, so it carries the same task_ref
+            # (Finding 2, adversarial review: _scan_for_conflicts now reads
+            # task_ref to distinguish a genuine conflict-copy of THIS task
+            # from an unrelated sibling task's own lock -- see
+            # AcquireLeaseSiblingTaskIdConflictShapeTests).
             conflict = locks_dir / f"{task_id}-FOREIGNHOST.lock"
             conflict.write_text(
-                json.dumps({"holder": "cowork", "session": "other"}), encoding="utf-8"
+                json.dumps({"task_ref": task_id, "holder": "cowork", "session": "other"}),
+                encoding="utf-8",
             )
 
         result = aaos.acquire_lease(
@@ -298,6 +307,68 @@ class AcquireLeaseContestedTests(BaseAaosTest):
 
         reloaded = aaos.load_task(task_id, PROJECT, root=str(self.root))
         self.assertEqual(reloaded["state"], "queued")
+
+
+class AcquireLeaseSiblingTaskIdConflictShapeTests(BaseAaosTest):
+    """Finding 2 (adversarial review): _matches_conflict_shape used a bare
+    filename.startswith(task_id) check, so leasing "t-a" while an unrelated
+    sibling task "t-a-b" holds ITS OWN live lock ("t-a-b.lock") was misread
+    as a OneDrive conflict-copy of "t-a" (e.g. the real shape
+    "t-a-<HOST>.lock") and falsely returned CONTESTED
+    (reviewer-demonstrated: conflict_paths: ['t-a-b.lock']). Common with
+    --suffix-timestamp ids where prefix-sibling task ids are routine."""
+
+    def test_sibling_task_id_lock_does_not_falsely_contest(self):
+        aaos.save_task(_make_task("t-a"), root=str(self.root))
+        aaos.save_task(_make_task("t-a-b"), root=str(self.root))
+
+        # t-a-b genuinely, legitimately holds its OWN live lock.
+        sibling_result = aaos.acquire_lease(
+            "t-a-b", PROJECT, "cowork", "sess-sibling",
+            now=NOW, settle_seconds=0, root=str(self.root),
+        )
+        self.assertEqual(sibling_result.outcome, aaos.LeaseOutcome.ACQUIRED)
+
+        # Leasing "t-a" must not be falsely CONTESTED by "t-a-b.lock".
+        result = aaos.acquire_lease(
+            "t-a", PROJECT, "claude-code", "sess-1",
+            now=NOW, settle_seconds=0, root=str(self.root),
+        )
+        self.assertEqual(
+            result.outcome, aaos.LeaseOutcome.ACQUIRED,
+            f"falsely CONTESTED by sibling task id's own lock: {result.conflict_paths!r}",
+        )
+
+    def test_true_conflict_copy_of_same_task_id_still_contests(self):
+        aaos.save_task(_make_task("t-a"), root=str(self.root))
+        locks_dir = aaos.lock_path("t-a", PROJECT, root=str(self.root)).parent
+        locks_dir.mkdir(parents=True, exist_ok=True)
+        # A genuine OneDrive conflict-copy of t-a's OWN lock (same
+        # task_ref, foreign holder) must still be CONTESTED.
+        aaos.save_json(locks_dir / "t-a-DESKTOP01.lock", {
+            "protocol_version": "1.0", "task_ref": "t-a", "holder": "cowork",
+            "session": "other-sess", "acquired": NOW.isoformat(),
+            "expires": (NOW + timedelta(minutes=45)).isoformat(),
+        })
+
+        result = aaos.acquire_lease(
+            "t-a", PROJECT, "claude-code", "sess-1",
+            now=NOW, settle_seconds=0, root=str(self.root),
+        )
+        self.assertEqual(result.outcome, aaos.LeaseOutcome.CONTESTED)
+        self.assertTrue(any("DESKTOP01" in p for p in result.conflict_paths))
+
+    def test_unparseable_conflict_shaped_file_still_fails_closed(self):
+        aaos.save_task(_make_task("t-a"), root=str(self.root))
+        locks_dir = aaos.lock_path("t-a", PROJECT, root=str(self.root)).parent
+        locks_dir.mkdir(parents=True, exist_ok=True)
+        (locks_dir / "t-a-DESKTOP01.lock").write_text("{not valid json", encoding="utf-8")
+
+        result = aaos.acquire_lease(
+            "t-a", PROJECT, "claude-code", "sess-1",
+            now=NOW, settle_seconds=0, root=str(self.root),
+        )
+        self.assertEqual(result.outcome, aaos.LeaseOutcome.CONTESTED)
 
 
 class AcquireLeaseExpiredReclaimTests(BaseAaosTest):
@@ -385,6 +456,37 @@ class CorruptLockTests(BaseAaosTest):
         self.assertEqual(decision.classification, "")
 
 
+class LoadHeartbeatTests(BaseAaosTest):
+    """Finding 6 (adversarial review): a corrupt heartbeat.json used to
+    return None identically to an absent one, with zero signal. The
+    fail-safe None-means-unknown return contract for CALLERS is unchanged
+    (that's still correct); what changed is that the corrupt case now also
+    prints a loud, visible warning distinguishing it from "never derived
+    yet"."""
+
+    def test_absent_heartbeat_returns_none_without_warning(self):
+        stderr = io.StringIO()
+        with contextlib.redirect_stderr(stderr):
+            result = aaos.load_heartbeat(root=str(self.root))
+        self.assertIsNone(result)
+        self.assertEqual(stderr.getvalue(), "")
+
+    def test_corrupt_heartbeat_returns_none_with_loud_warning(self):
+        hb_path = aaos.heartbeat_path(root=str(self.root))
+        hb_path.parent.mkdir(parents=True, exist_ok=True)
+        hb_path.write_text("{not valid json", encoding="utf-8")
+
+        stderr = io.StringIO()
+        with contextlib.redirect_stderr(stderr):
+            result = aaos.load_heartbeat(root=str(self.root))
+
+        self.assertIsNone(result)
+        warning = stderr.getvalue()
+        self.assertIn("WARNING", warning)
+        self.assertIn("heartbeat.json", warning)
+        self.assertIn(str(hb_path), warning)
+
+
 # ---------------------------------------------------------------------------
 # 1.10 emit_event / spool / drain, and the commit_state_change backstop
 # ---------------------------------------------------------------------------
@@ -433,20 +535,32 @@ class EmitEventTests(BaseAaosTest):
 
 
 class EventSpoolTests(BaseAaosTest):
-    def test_append_failure_twice_spools_then_later_drain_folds_in_oldest_first(self):
-        def _always_fail(*args, **kwargs):
-            raise RuntimeError("simulated persistent append lock")
+    """REVISED (post-review, PHASE3-DESIGN.md section 1.10): the pending
+    (spool) file write is now emit_event's commit point -- see
+    tests/test_event_log_concurrency.py for the Finding-1 concurrency
+    regression test that drove this redesign. These tests pin down the
+    two halves of the new contract: (1) a drain failure after a successful
+    commit must not lose the event, and (2) a commit (pending-write)
+    failure is the only thing that raises EventCommitError."""
 
-        original_append = aaos._atomic_append_ndjson
-        aaos._atomic_append_ndjson = _always_fail
+    def test_drain_failure_leaves_event_committed_pending_then_later_drain_folds_in_oldest_first(self):
+        def _always_fail(*args, **kwargs):
+            raise RuntimeError("simulated persistent drain-lock contention")
+
+        original_drain = aaos.drain_event_spool
+        aaos.drain_event_spool = _always_fail
         try:
             event_id_1 = aaos.emit_event(
                 "TaskCreated", "claude-code", PROJECT,
                 refs={"task": "t-a"}, now=NOW, root=str(self.root),
             )
         finally:
-            aaos._atomic_append_ndjson = original_append
+            aaos.drain_event_spool = original_drain
 
+        # The event is durably committed to pending even though its own
+        # drain attempt failed -- this is the load-bearing assertion of
+        # the redesign: commit (pending write) succeeded, so nothing was
+        # lost, even though it hasn't been folded into the NDJSON yet.
         spool_dir = aaos.event_spool_dir(PROJECT, root=str(self.root))
         spooled_files = list(spool_dir.glob("*.json"))
         self.assertEqual(len(spooled_files), 1)
@@ -455,6 +569,8 @@ class EventSpoolTests(BaseAaosTest):
         if log_path.exists():
             self.assertNotIn(event_id_1, log_path.read_text(encoding="utf-8"))
 
+        # A later, successful emit_event drains BOTH the still-pending
+        # event_id_1 and its own event_id_2, oldest-first.
         event_id_2 = aaos.emit_event(
             "TaskLeased", "claude-code", PROJECT,
             refs={"task": "t-a"}, now=NOW + timedelta(seconds=1), root=str(self.root),
@@ -468,6 +584,201 @@ class EventSpoolTests(BaseAaosTest):
         ids = [e["event_id"] for e in lines]
         self.assertEqual(ids, [event_id_1, event_id_2])
         self.assertEqual(list(spool_dir.glob("*.json")), [])
+
+    def test_pending_write_failure_raises_event_commit_error_nothing_written(self):
+        def _boom(*args, **kwargs):
+            raise OSError("simulated disk full")
+
+        original_spool = aaos.spool_event
+        aaos.spool_event = _boom
+        try:
+            with self.assertRaises(aaos.EventCommitError):
+                aaos.emit_event(
+                    "TaskCreated", "claude-code", PROJECT,
+                    refs={"task": "t-x"}, now=NOW, root=str(self.root),
+                )
+        finally:
+            aaos.spool_event = original_spool
+
+        log_path = aaos.events_log_path(PROJECT, root=str(self.root))
+        self.assertFalse(log_path.exists())
+        spool_dir = aaos.event_spool_dir(PROJECT, root=str(self.root))
+        remaining = list(spool_dir.glob("*.json")) if spool_dir.is_dir() else []
+        self.assertEqual(remaining, [])
+
+
+class DrainLockTests(BaseAaosTest):
+    """Finding 1, point 2-4: the drain lock is skip-not-block on a live
+    holder, and a stale (>5min or unparseable) lock is archived and
+    reclaimed rather than wedging draining forever."""
+
+    def test_held_drain_lock_causes_drain_to_skip_not_block(self):
+        aaos.spool_event(
+            {
+                "protocol_version": "1.0", "event_id": "e-x-1", "type": "TaskCreated",
+                "actor": "claude-code", "timestamp": NOW.isoformat(),
+                "project_id": PROJECT, "refs": {"task": "t-x"},
+            },
+            PROJECT, root=str(self.root),
+        )
+        lock_path = aaos._drain_lock_path(PROJECT, root=str(self.root))
+        aaos._exclusive_publish(
+            lock_path,
+            json.dumps({"holder_pid": 999999, "acquired": NOW.isoformat()}).encode("utf-8"),
+        )
+
+        drained = aaos.drain_event_spool(PROJECT, root=str(self.root), now=NOW)
+        self.assertEqual(drained, 0)
+
+        # Event is still safely pending; nothing was folded, no exception.
+        spool_dir = aaos.event_spool_dir(PROJECT, root=str(self.root))
+        self.assertEqual(len(list(spool_dir.glob("*.json"))), 1)
+        log_path = aaos.events_log_path(PROJECT, root=str(self.root))
+        self.assertFalse(log_path.exists())
+
+    def test_stale_drain_lock_is_archived_and_reclaimed(self):
+        aaos.spool_event(
+            {
+                "protocol_version": "1.0", "event_id": "e-x-1", "type": "TaskCreated",
+                "actor": "claude-code", "timestamp": NOW.isoformat(),
+                "project_id": PROJECT, "refs": {"task": "t-x"},
+            },
+            PROJECT, root=str(self.root),
+        )
+        lock_path = aaos._drain_lock_path(PROJECT, root=str(self.root))
+        stale_acquired = NOW - timedelta(minutes=10)
+        aaos._exclusive_publish(
+            lock_path,
+            json.dumps({"holder_pid": 999999, "acquired": stale_acquired.isoformat()}).encode("utf-8"),
+        )
+
+        drained = aaos.drain_event_spool(PROJECT, root=str(self.root), now=NOW)
+        self.assertEqual(drained, 1)
+
+        archive_dir = aaos._events_archive_dir(PROJECT, root=str(self.root))
+        archived = list(archive_dir.glob("drainlock.*"))
+        self.assertEqual(len(archived), 1, "stale lock must be archived, not deleted")
+
+        log_path = aaos.events_log_path(PROJECT, root=str(self.root))
+        self.assertIn("e-x-1", log_path.read_text(encoding="utf-8"))
+
+
+class CorruptPendingFileTests(BaseAaosTest):
+    """Finding 7: drain must not discard a malformed pending file by
+    unlinking it (never-delete doctrine) -- move it to _corrupt/ instead,
+    with a loud warning, and keep draining everything else."""
+
+    def test_malformed_pending_file_moved_to_corrupt_not_deleted(self):
+        spool_dir = aaos.event_spool_dir(PROJECT, root=str(self.root))
+        os.makedirs(spool_dir, exist_ok=True)
+        bad = spool_dir / "00000000000000000-1-badbad.json"
+        bad.write_text("{not valid json", encoding="utf-8")
+
+        aaos.spool_event(
+            {
+                "protocol_version": "1.0", "event_id": "e-good-1", "type": "TaskCreated",
+                "actor": "claude-code", "timestamp": NOW.isoformat(),
+                "project_id": PROJECT, "refs": {"task": "t-good"},
+            },
+            PROJECT, root=str(self.root),
+        )
+
+        drained = aaos.drain_event_spool(PROJECT, root=str(self.root), now=NOW)
+        self.assertEqual(drained, 1)  # only the good one is counted as drained
+
+        self.assertFalse(bad.exists(), "corrupt file must be moved out of pending/, not left in place")
+        corrupt_dir = aaos._pending_corrupt_dir(PROJECT, root=str(self.root))
+        moved = list(corrupt_dir.glob("*.json"))
+        self.assertEqual(len(moved), 1, "corrupt file must be moved, never unlinked")
+        self.assertEqual(moved[0].read_text(encoding="utf-8"), "{not valid json")
+
+        log_path = aaos.events_log_path(PROJECT, root=str(self.root))
+        self.assertIn("e-good-1", log_path.read_text(encoding="utf-8"))
+
+
+class EventIdUniquenessTests(BaseAaosTest):
+    """Finding 1b: event_id = f"e-{iso}-{next(_EVENT_SEQ)}" collided across
+    processes sharing an injected --now, because _EVENT_SEQ is a fresh
+    itertools.count(1) per process. The fix folds in the real wall clock
+    (time.time_ns(), independent of any injected `now`), so two "processes"
+    -- simulated here by resetting the module-level counter, exactly what
+    happens when a second `python tools/emit-event.py` invocation starts --
+    still mint distinct ids for the same injected now."""
+
+    def test_event_id_unique_when_sequence_counter_resets_under_same_injected_now(self):
+        import itertools as _itertools
+
+        aaos._EVENT_SEQ = _itertools.count(1)
+        id_a = aaos.emit_event(
+            "TaskCreated", "claude-code", PROJECT,
+            refs={"task": "t-a"}, now=NOW, root=str(self.root),
+        )
+        aaos._EVENT_SEQ = _itertools.count(1)  # simulate a fresh process's counter
+        id_b = aaos.emit_event(
+            "TaskCreated", "claude-code", PROJECT,
+            refs={"task": "t-b"}, now=NOW, root=str(self.root),
+        )
+        self.assertNotEqual(id_a, id_b, "event_id collided across a simulated cross-process counter reset")
+        for event_id in (id_a, id_b):
+            self.assertRegex(event_id, r"^e-[0-9TZ:.+\-]+-[0-9]+$")
+
+    def test_many_ids_under_one_fixed_injected_now_are_unique(self):
+        ids = {
+            aaos.emit_event(
+                "TaskCreated", "claude-code", PROJECT,
+                refs={"task": f"t-{i}"}, now=NOW, root=str(self.root),
+            )
+            for i in range(20)
+        }
+        self.assertEqual(len(ids), 20)
+
+
+class ReadEventsTests(BaseAaosTest):
+    """Finding 1, point 6: readers must see committed-but-still-pending
+    events, not just what has been drained into the NDJSON."""
+
+    def test_includes_ndjson_and_pending_deduped_sorted_by_timestamp(self):
+        aaos.emit_event(
+            "TaskCreated", "claude-code", PROJECT,
+            refs={"task": "t-a"}, now=NOW, root=str(self.root),
+        )  # drains immediately -- lands in the NDJSON
+
+        # Hold the drain lock so the next emit_event's own event is
+        # committed to pending but can't be folded in yet.
+        lock_path = aaos._drain_lock_path(PROJECT, root=str(self.root))
+        aaos._exclusive_publish(
+            lock_path,
+            json.dumps({"holder_pid": 1, "acquired": NOW.isoformat()}, ensure_ascii=False).encode("utf-8"),
+        )
+        try:
+            aaos.emit_event(
+                "TaskLeased", "claude-code", PROJECT,
+                refs={"task": "t-b"}, now=NOW + timedelta(minutes=1), root=str(self.root),
+            )
+        finally:
+            os.unlink(lock_path)
+
+        spool_dir = aaos.event_spool_dir(PROJECT, root=str(self.root))
+        self.assertEqual(len(list(spool_dir.glob("*.json"))), 1, "second event should still be pending")
+
+        events = aaos.read_events(PROJECT, root=str(self.root))
+        self.assertEqual([e["type"] for e in events], ["TaskCreated", "TaskLeased"])
+
+    def test_dedup_by_event_id_when_same_event_present_in_both_ndjson_and_pending(self):
+        event = {
+            "protocol_version": "1.0", "event_id": "e-dup-1", "type": "TaskCreated",
+            "actor": "claude-code", "timestamp": NOW.isoformat(),
+            "project_id": PROJECT, "refs": {"task": "t-dup"},
+        }
+        log_path = aaos.events_log_path(PROJECT, root=str(self.root))
+        aaos.atomic_write(log_path, json.dumps(event) + "\n")
+        aaos.spool_event(event, PROJECT, root=str(self.root))  # same event_id, still (not-yet-drained) pending
+
+        events = aaos.read_events(PROJECT, root=str(self.root))
+        self.assertEqual(len(events), 1)
+
+    def test_empty_when_nothing_committed(self):
+        self.assertEqual(aaos.read_events(PROJECT, root=str(self.root)), [])
 
 
 # ---------------------------------------------------------------------------

@@ -40,7 +40,9 @@ import json
 import os
 import posixpath
 import re
+import sys
 import time
+import uuid
 from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Callable
@@ -150,7 +152,14 @@ class CorruptStateError(AaosError):
 
 
 class EventCommitError(AaosError):
-    """emit_event could neither append nor spool -> exit 5."""
+    """emit_event's durable commit failed -> exit 5.
+
+    REVISED (post-review, see PHASE3-DESIGN.md section 1.10): the pending
+    (spool) file write is now the commit point, so this is raised ONLY
+    when that write itself fails (or the event fails schema validation
+    before ever reaching it). A failure to *drain* pending events into
+    the NDJSON afterward is non-fatal -- the event is already durably
+    committed in pending and will be folded in by a later drain."""
 
 
 # ---------------------------------------------------------------------------
@@ -204,6 +213,23 @@ def events_log_path(project_id, *, root: str | None = None) -> Path:
 def event_spool_dir(project_id, *, root: str | None = None) -> Path:
     log_path = events_log_path(project_id, root=root)
     return log_path.parent / (log_path.name + ".pending")
+
+
+def _drain_lock_path(project_id, *, root: str | None = None) -> Path:
+    log_path = events_log_path(project_id, root=root)
+    return log_path.parent / (log_path.name + ".drainlock")
+
+
+def _events_archive_dir(project_id, *, root: str | None = None) -> Path:
+    return events_log_path(project_id, root=root).parent / "_archive"
+
+
+def _pending_drained_dir(project_id, *, root: str | None = None) -> Path:
+    return event_spool_dir(project_id, root=root) / "_drained"
+
+
+def _pending_corrupt_dir(project_id, *, root: str | None = None) -> Path:
+    return event_spool_dir(project_id, root=root) / "_corrupt"
 
 
 def heartbeat_path(*, root: str | None = None) -> Path:
@@ -302,12 +328,25 @@ def load_lock(task_id, project_id, *, root: str | None = None) -> dict | None:
 
 
 def load_heartbeat(*, root: str | None = None) -> dict | None:
+    """None if heartbeat.json is absent (normal/expected -- no warning) or
+    unreadable/corrupt (Finding 6, adversarial review: this used to return
+    None identically for both cases with no signal at all for the corrupt
+    one. Callers already treat None as "unknown" correctly and fail safe on
+    it -- that return contract is unchanged -- but a corrupt liveness
+    projection is a real degradation worth a loud, visible warning rather
+    than silently looking identical to "heartbeat was never derived yet.")
+    """
     path = heartbeat_path(root=root)
     if not path.exists():
         return None
     try:
         return load_json(path)
-    except (UsageError, CorruptStateError):
+    except (UsageError, CorruptStateError) as exc:
+        print(
+            f"WARNING: heartbeat.json exists but is unreadable/corrupt "
+            f"({path}): {exc}; treating all agents as heartbeat-unknown",
+            file=sys.stderr,
+        )
         return None
 
 
@@ -420,7 +459,16 @@ _CONFLICT_SUFFIX_RE = re.compile(r"^(-[A-Za-z0-9_.-]+)?( \(\d+\))?\.lock$")
 
 def _matches_conflict_shape(filename: str, task_id: str) -> bool:
     """True for the canonical <task_id>.lock as well as OneDrive
-    conflict-copy shapes: <id>-<HOST>.lock, <id> (N).lock, <id>-<HOST> (N).lock."""
+    conflict-copy shapes: <id>-<HOST>.lock, <id> (N).lock, <id>-<HOST> (N).lock.
+
+    This is a FILENAME-shape test only -- a positive match here is a
+    candidate, not a confirmed conflict. A filename can match this shape
+    purely because it starts with task_id followed by a hyphen (e.g.
+    task_id="t-a", filename="t-a-b.lock") while actually being the
+    canonical lock of an unrelated sibling task ("t-a-b"), not a
+    conflict-copy of "t-a" at all. See _scan_for_conflicts, which resolves
+    that ambiguity by reading the candidate's own task_ref (Finding 2,
+    adversarial review)."""
     if not filename.startswith(task_id):
         return False
     suffix = filename[len(task_id):]
@@ -447,8 +495,32 @@ def _scan_for_conflicts(locks_dir: Path, task_id: str, holder: str, session: str
             if data.get("holder") != holder or data.get("session") != session:
                 conflicts.append(str(entry))
             continue
-        # Any other matching filename is itself a conflict-copy shape.
-        conflicts.append(str(entry))
+
+        # Any OTHER filename matching the conflict-copy SHAPE is only a
+        # genuine conflict if its own content confirms it: this is
+        # actually a copy of THIS task's lock (task_ref == task_id) held
+        # by someone else. Filename shape alone can't distinguish a real
+        # OneDrive conflict-copy ("t-a-DESKTOP01.lock", content
+        # task_ref="t-a") from an unrelated sibling task's own canonical
+        # lock ("t-a-b.lock", content task_ref="t-a-b") -- read the
+        # content to tell them apart (Finding 2, adversarial review: the
+        # old code treated every shape-match here as an automatic
+        # conflict, falsely CONTESTing "t-a" whenever sibling task "t-a-b"
+        # merely held its own live lock).
+        try:
+            data = load_json(entry)
+        except AaosError:
+            conflicts.append(str(entry))  # unparseable -- fail closed, still a conflict
+            continue
+
+        if data.get("task_ref") != task_id:
+            continue  # a different task's own lock -- not a conflict for us
+
+        if data.get("holder") != holder or data.get("session") != session:
+            conflicts.append(str(entry))
+        # else: content confirms this conflict-copy-shaped file actually
+        # IS our own lock (same task_ref, same holder/session) -- nothing
+        # to fail closed on.
     return conflicts
 
 
@@ -597,6 +669,16 @@ def acquire_lease(
 # ---------------------------------------------------------------------------
 
 def commit_state_change(new_state_obj: dict, state_path: Path | str, event: dict, *, root: str | None = None) -> str:
+    """Stage new_state_obj to a tmp file, commit the event, then rename the
+    tmp file into place. Ordering contract (unchanged conceptually post-
+    review): the event is committed before the state is renamed into place.
+
+    REVISED (post-review, PHASE3-DESIGN.md section 1.10): "committed" now
+    means emit_event's durable pending-file write succeeded -- not that the
+    event has necessarily been folded into the NDJSON yet (that fold/drain
+    is best-effort and may happen slightly later). If emit_event raises
+    EventCommitError (the pending write itself failed), the staged tmp
+    state file is discarded and the state is left unchanged."""
     state_path = Path(state_path)
     tmp = state_path.parent / f"{state_path.name}.tmp-{os.getpid()}"
     content = json.dumps(new_state_obj, indent=2, ensure_ascii=False)
@@ -616,6 +698,32 @@ def commit_state_change(new_state_obj: dict, state_path: Path | str, event: dict
 
 
 def assert_lease_held(task: dict, holder: str, session: str, *, now: datetime | None = None, skew_minutes: int = 5) -> None:
+    """Raise LeaseLostError unless task.lease is held by holder/session and
+    not past its expiry+skew grace. The double-run backstop called
+    immediately before commit_state_change in complete-task/fail-task/
+    post-handoff.
+
+    Residual-window note (Finding 8, adversarial review -- no code change,
+    documented per the reviewer's request): this assert-then-replace
+    sequence is NOT a compare-and-swap. There is a residual window between
+    this check and the caller's subsequent commit_state_change during which
+    another process could in principle also pass this same assert (e.g. two
+    runs of the same script racing to complete the same task). In practice
+    the realistic reclaim-vs-complete race -- a sweep reclaiming an expired
+    lease while a live holder is still trying to complete it -- is already
+    closed by the expiry check inside this function: a reclaim only
+    proceeds once the lease is genuinely past expiry+skew, at which point
+    this assert would itself raise LeaseLostError for the original holder.
+    The residual case that remains is a *same-holder* double-run (e.g. a
+    retried invocation, or an agent session accidentally started twice) --
+    both invocations can pass this assert and both attempt the same
+    terminal transition. This converges rather than corrupts: the second
+    commit_state_change either produces an idempotent no-op (the caller
+    scripts check terminal states before this assert) or, in the narrow
+    window where both are mid-flight simultaneously, a duplicate terminal
+    event (e.g. two Completed events) with a consistent final task state
+    (last os.replace wins, and both writers were writing the same
+    "done"/"failed" content). Safe-if-ugly; accepted."""
     resolved_now = _now(now)
     lease = task.get("lease") if isinstance(task, dict) else None
     task_id = task.get("id") if isinstance(task, dict) else "?"
@@ -635,84 +743,386 @@ def assert_lease_held(task: dict, holder: str, session: str, *, now: datetime | 
 
 # ---------------------------------------------------------------------------
 # 1.10 Event emission — ADR-0004 discipline
+#
+# REVISED (post-review): spool-as-commit-point + drain-lock model. See
+# docs/PHASE3-DESIGN.md section 1.10 "REVISED (post-review)" for the full
+# narrative; summary here for anyone reading only the code:
+#
+#   1. emit_event ALWAYS commits the event to a uniquely-named pending file
+#      first (spool_event). That write is atomic and collision-free (see
+#      the filename scheme below) and IS the durable commit -- if
+#      everything after it fails, the event is still safely committed.
+#   2. emit_event then attempts a best-effort drain: fold ALL pending files
+#      (oldest-first) into the NDJSON, but only while holding an exclusive
+#      drain lock (events/aaos-events.ndjson.drainlock, O_CREAT|O_EXCL,
+#      the same primitive as task leases). If the lock is already held,
+#      drain skips immediately -- it NEVER blocks/waits. The event stays
+#      pending; a later drain (the next emit_event, an expire-leases sweep,
+#      or a manual --drain-only) folds it in.
+#   3. A drain lock whose `acquired` timestamp is older than 5 minutes (or
+#      unparseable) is presumed abandoned by a crashed drainer: the next
+#      drainer archives it (never deletes) and takes over.
+#   4. Readers (project-notion.py, fail-task.py's DoubleFailure check) must
+#      see pending-but-undrained events too -- see read_events() below.
 # ---------------------------------------------------------------------------
 
 _EVENT_SEQ = itertools.count(1)
-
-
-def _atomic_append_ndjson(log_path: Path, line: str) -> None:
-    """mtime-guarded read-all -> append line -> os.replace. Raises on
-    mtime-changed-mid-read or any I/O error; caller decides retry/spool."""
-    log_path = Path(log_path)
-    os.makedirs(log_path.parent, exist_ok=True)
-    if log_path.exists():
-        st_before = os.stat(log_path).st_mtime_ns
-        with open(log_path, "r", encoding="utf-8") as fh:
-            content = fh.read()
-        if os.stat(log_path).st_mtime_ns != st_before:
-            raise RuntimeError(f"event log changed mid-read (mtime guard tripped): {log_path}")
-    else:
-        content = ""
-    if content and not content.endswith("\n"):
-        content += "\n"
-    new_content = content + line + "\n"
-
-    tmp = log_path.parent / f"{log_path.name}.tmp-{os.getpid()}"
-    atomic_write(tmp, new_content)
-    os.replace(str(tmp), str(log_path))
+_DRAIN_LOCK_STALE_MINUTES = 5
 
 
 def spool_event(event: dict, project_id, *, root: str | None = None) -> Path:
+    """Durably commit `event` to a uniquely-named pending file. This is the
+    commit point (see module section header above): once this call
+    returns, the event has happened, independent of whether/when it gets
+    folded into the NDJSON.
+
+    Filename is <time_ns>-<pid>-<uuid4 hex>.json. The time_ns-then-pid
+    prefix preserves oldest-first sort order for draining (matching the
+    pre-review scheme exactly); the uuid suffix is load-bearing, not
+    decorative -- two threads in the *same* process can observe an
+    identical time.time_ns() value (clock resolution is coarser than the
+    GIL's context-switch granularity on some platforms), and without a
+    per-call-unique suffix a second thread's atomic_write/os.replace would
+    silently clobber the first thread's still-unread pending file, which is
+    exactly the class of bug this whole redesign exists to eliminate."""
     spool_dir = event_spool_dir(project_id, root=root)
     os.makedirs(spool_dir, exist_ok=True)
-    target = spool_dir / f"{time.time_ns()}-{os.getpid()}.json"
+    target = spool_dir / f"{time.time_ns()}-{os.getpid()}-{uuid.uuid4().hex}.json"
     atomic_write(target, json.dumps(event, ensure_ascii=False))
     return target
 
 
-def drain_event_spool(project_id, *, root: str | None = None, attempts: int = 3) -> int:
-    """Replay spooled events oldest-first into the NDJSON. Stops at the
-    first one that still can't be appended (leaves it + the rest for next
-    time). A malformed spooled file is discarded so it can't wedge the
-    queue forever. Returns the count successfully drained."""
+def _exclusive_publish(path: Path, data: bytes) -> None:
+    """Exclusive-create `path` (FileExistsError if it already exists) with
+    `data` as its complete, already-durable content -- no partial-write
+    window a concurrent reader can observe.
+
+    Implementation note, found via this fix's own red/green TDD cycle (not
+    theoretical): a plain os.open(O_CREAT|O_EXCL|O_WRONLY) followed by a
+    separate write() -- the primitive _exclusive_create uses for task-lease
+    locks elsewhere in this module -- has a narrow window between create
+    and write during which a concurrent reader can observe the file as
+    existing-but-empty/partial. Under the low contention task leases
+    normally see (one lock per task) that has never been observed to
+    matter; under the much higher contention the drain lock sees (every
+    concurrent emit_event call across every task in a project races the
+    SAME single lock), it was directly observed to matter: a reader would
+    misread the in-flight write as an abandoned/stale lock and "steal" it,
+    handing two callers the drain lock at once and reintroducing the exact
+    unsynchronized-NDJSON-writer clobber (Finding 1) this mechanism exists
+    to prevent.
+
+    Fix: write the full content to a private temp file first (flushed +
+    fsynced), then publish it under the real name via os.link, which is
+    itself exclusive (raises FileExistsError if the destination already
+    exists) but atomic-with-full-content -- there is no name under which
+    the file is visible before its content is complete."""
+    path = Path(path)
+    os.makedirs(path.parent, exist_ok=True)
+    tmp = path.parent / f"{path.name}.tmp-{os.getpid()}-{uuid.uuid4().hex}"
+    with open(tmp, "wb") as fh:
+        fh.write(data)
+        fh.flush()
+        os.fsync(fh.fileno())
+    try:
+        os.link(str(tmp), str(path))
+    finally:
+        try:
+            tmp.unlink()
+        except OSError:
+            pass
+
+
+def _read_drain_lock_acquired(lock_path: Path) -> datetime | None:
+    """Best-effort parse of a drain lock file's `acquired` field. None on
+    any read/parse failure -- callers treat that as stale. Safe to treat
+    as an immediate, non-retried fail-to-stale here (unlike an earlier
+    version of this function): _try_acquire_drain_lock publishes the lock
+    via _exclusive_publish, which guarantees the file is never visible
+    under its real name with partial content, so an unparseable read here
+    means a genuinely corrupt/abandoned lock, not a legitimate in-flight
+    write."""
+    try:
+        data = json.loads(lock_path.read_text(encoding="utf-8"))
+        return _parse_iso_dt(data.get("acquired"))
+    except Exception:
+        return None
+
+
+def _try_acquire_drain_lock(project_id, *, root: str | None = None, now: datetime | None = None) -> Path | None:
+    """Try to exclusively create the drain lock. Returns the lock path if
+    acquired, or None if another drainer currently holds a live lock --
+    this function NEVER blocks/waits on a live lock (design mandate: a
+    skipped drain just leaves events safely pending for next time).
+
+    A lock whose `acquired` timestamp is stale (>_DRAIN_LOCK_STALE_MINUTES
+    old, or unparseable) is presumed abandoned by a crashed drainer: it is
+    archived (os.replace, never deleted -- never-delete doctrine) and
+    acquisition is retried once."""
+    resolved_now = _now(now)
+    lock_path = _drain_lock_path(project_id, root=root)
+    content = json.dumps(
+        {"holder_pid": os.getpid(), "acquired": resolved_now.isoformat()},
+        ensure_ascii=False,
+    ).encode("utf-8")
+
+    os.makedirs(lock_path.parent, exist_ok=True)
+    for _attempt in range(2):
+        try:
+            _exclusive_publish(lock_path, content)
+            return lock_path
+        except FileExistsError:
+            acquired_at = _read_drain_lock_acquired(lock_path)
+            is_stale = (
+                acquired_at is None
+                or resolved_now - acquired_at > timedelta(minutes=_DRAIN_LOCK_STALE_MINUTES)
+            )
+            if not is_stale:
+                return None  # a live drainer is active -- never steal, never block
+
+            archive_dir = _events_archive_dir(project_id, root=root)
+            os.makedirs(archive_dir, exist_ok=True)
+            compact_ts = resolved_now.strftime("%Y%m%dT%H%M%S%f")
+            target = archive_dir / f"drainlock.{compact_ts}"
+            if target.exists():
+                target = archive_dir / f"drainlock.{compact_ts}.{os.getpid()}"
+            try:
+                os.replace(str(lock_path), str(target))
+            except FileNotFoundError:
+                pass  # someone else already cleared it -- fall through and retry create
+    return None
+
+
+def _release_drain_lock(lock_path: Path) -> None:
+    """Release (remove) a drain lock we hold, retrying briefly on a
+    transient sharing violation.
+
+    Found via this fix's own red/green TDD cycle: on Windows, a concurrent
+    _read_drain_lock_acquired() call from another thread checking whether
+    it's safe to steal a (still-live) lock can momentarily hold an open
+    read handle on the exact same path this call is trying to unlink,
+    raising PermissionError(13, "used by another process"). A single
+    unretried failure here used to be swallowed silently, permanently
+    orphaning the lock for the rest of the process's life (it's still
+    fresh, so nothing else is willing to steal it either) -- draining
+    would then wedge indefinitely with events stuck pending, which is
+    exactly the kind of loss this whole mechanism exists to prevent. The
+    retries are bounded (<=~50ms worst case) and Windows-transient sharing
+    violations clear in low single-digit milliseconds in practice."""
+    for attempt in range(10):
+        try:
+            os.unlink(str(lock_path))
+            return
+        except FileNotFoundError:
+            return
+        except OSError:
+            if attempt < 9:
+                time.sleep(0.005)
+    # Still couldn't remove it after retrying -- leave it in place rather
+    # than raise (this runs in a `finally`). Its `acquired` timestamp is
+    # still accurate, so the next drainer's staleness check behaves
+    # correctly (treats it as live until it genuinely goes stale); no
+    # event is ever at risk from a release failure, only drain latency.
+
+
+def drain_event_spool(project_id, *, root: str | None = None, now: datetime | None = None) -> int:
+    """Fold all committed-but-undrained pending events into the NDJSON.
+
+    The pending directory IS the commit point (see spool_event); draining
+    is a best-effort optimization, not a correctness requirement. If the
+    drain lock is held by another drainer, this returns 0 immediately
+    without touching anything (never blocks). Returns the number of
+    pending files folded/moved in this call (0 if nothing was pending or
+    the lock couldn't be acquired).
+
+    Concurrency: mutual exclusion is the O_CREAT|O_EXCL drain lock (see
+    _try_acquire_drain_lock) -- only the lock holder ever writes the
+    NDJSON, so the old mtime-guarded-read-then-replace race (Finding 1)
+    cannot recur: there is exactly one writer at a time by construction,
+    not by optimistic detection.
+
+    Dedup-by-event_id against the existing NDJSON content is deliberate,
+    not just defensive: the merge below is two steps (write NDJSON, then
+    move drained pending files to _drained/) that are not atomic as a
+    pair. If a drainer crashes between them, the same pending files will
+    be re-read by the next drain; without the dedup check their events
+    would be duplicated into the NDJSON.
+
+    Malformed pending files are moved to .../<log>.pending/_corrupt/ (never
+    unlinked -- never-delete doctrine, Finding 7) with a loud stderr
+    warning, rather than silently discarded."""
     spool_dir = event_spool_dir(project_id, root=root)
     if not spool_dir.is_dir():
         return 0
 
-    log_path = events_log_path(project_id, root=root)
-    names = sorted(p.name for p in spool_dir.iterdir() if p.is_file() and p.name.endswith(".json"))
+    def _list_pending():
+        return sorted(p.name for p in spool_dir.iterdir() if p.is_file() and p.name.endswith(".json"))
 
-    drained = 0
-    for name in names:
-        p = spool_dir / name
-        try:
-            event = json.loads(p.read_text(encoding="utf-8"))
-        except (OSError, json.JSONDecodeError):
-            try:
-                p.unlink()
-            except OSError:
-                pass
-            continue
+    if not _list_pending():
+        return 0
 
-        line = json.dumps(event, ensure_ascii=False)
-        done = False
-        for _attempt in range(attempts):
+    lock_path = _try_acquire_drain_lock(project_id, root=root, now=now)
+    if lock_path is None:
+        return 0  # another drainer is active (or we lost the race) -- never block
+
+    try:
+        names = _list_pending()  # re-list under the lock: more may have landed since the check above
+        if not names:
+            return 0
+
+        log_path = events_log_path(project_id, root=root)
+        existing_content = ""
+        existing_ids: set = set()
+        if log_path.exists():
+            existing_content = log_path.read_text(encoding="utf-8")
+            for line in existing_content.splitlines():
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    existing_ids.add(json.loads(line).get("event_id"))
+                except json.JSONDecodeError:
+                    continue
+
+        corrupt_dir = _pending_corrupt_dir(project_id, root=root)
+        drained_dir = _pending_drained_dir(project_id, root=root)
+
+        new_lines: list[str] = []
+        to_move: list[tuple[Path, str]] = []
+
+        for name in names:
+            p = spool_dir / name
             try:
-                _atomic_append_ndjson(log_path, line)
-                done = True
-                break
-            except Exception:
+                raw = p.read_text(encoding="utf-8")
+            except FileNotFoundError:
+                # Listed a moment ago but gone by the time we got here.
+                # We hold the exclusive drain lock, so nothing else should
+                # legitimately be removing pending files out from under
+                # us -- but this has been observed transiently under very
+                # high write concurrency (directory-listing/rename timing
+                # on Windows). Whatever removed it did so through this
+                # same module's own machinery, so the underlying event is
+                # not at risk; just skip it rather than misreport a
+                # perfectly fine file as "malformed."
                 continue
-        if not done:
-            break  # still locked -- retry this + the rest on a later run
+            except OSError as exc:
+                os.makedirs(corrupt_dir, exist_ok=True)
+                target = corrupt_dir / name
+                try:
+                    os.replace(str(p), str(target))
+                except OSError:
+                    pass
+                print(
+                    f"WARNING: unreadable pending event file moved to {target} (not folded, not lost): {exc}",
+                    file=sys.stderr,
+                )
+                continue
 
+            try:
+                event = json.loads(raw)
+                if not isinstance(event, dict) or not event.get("event_id"):
+                    raise ValueError("pending event missing event_id or not an object")
+            except (json.JSONDecodeError, ValueError) as exc:
+                os.makedirs(corrupt_dir, exist_ok=True)
+                target = corrupt_dir / name
+                try:
+                    os.replace(str(p), str(target))
+                except OSError:
+                    pass
+                print(
+                    f"WARNING: malformed pending event file moved to {target} (not folded, not lost): {exc}",
+                    file=sys.stderr,
+                )
+                continue
+
+            if event["event_id"] not in existing_ids:
+                new_lines.append(json.dumps(event, ensure_ascii=False))
+                existing_ids.add(event["event_id"])
+            to_move.append((p, name))
+
+        if new_lines:
+            content = existing_content
+            if content and not content.endswith("\n"):
+                content += "\n"
+            content += "\n".join(new_lines) + "\n"
+            tmp = log_path.parent / f"{log_path.name}.tmp-{os.getpid()}"
+            atomic_write(tmp, content)
+            os.replace(str(tmp), str(log_path))
+
+        if to_move:
+            os.makedirs(drained_dir, exist_ok=True)
+            for p, name in to_move:
+                try:
+                    os.replace(str(p), str(drained_dir / name))
+                except OSError:
+                    pass
+
+        return len(to_move)
+    finally:
+        _release_drain_lock(lock_path)
+
+
+def read_events(project_id, *, root: str | None = None) -> list[dict]:
+    """The shared "what has actually happened" view: NDJSON lines plus all
+    not-yet-drained pending events, deduped by event_id, sorted by parsed
+    timestamp (stable -- ties preserve NDJSON-then-pending, oldest-pending-
+    first order; entries with an unparseable/missing timestamp sort last,
+    fail-closed, rather than crashing or being silently dropped).
+
+    Every AAOS reader that needs "has event X happened for task Y" must go
+    through this, not raw NDJSON parsing: an event that emit_event has
+    durably committed to pending, but that hasn't been folded into the
+    NDJSON yet (e.g. because another drainer held the lock), is still a
+    real, already-happened event -- a reader that only looks at the NDJSON
+    can miss it. Concretely: project-notion.py's latest-event-per-task and
+    fail-task.py's prior-Failed DoubleFailure check."""
+    events: list[dict] = []
+    seen_ids: set = set()
+
+    log_path = events_log_path(project_id, root=root)
+    if log_path.exists():
+        for line in log_path.read_text(encoding="utf-8").splitlines():
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                event = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            if not isinstance(event, dict):
+                continue
+            event_id = event.get("event_id")
+            if event_id is not None:
+                if event_id in seen_ids:
+                    continue
+                seen_ids.add(event_id)
+            events.append(event)
+
+    spool_dir = event_spool_dir(project_id, root=root)
+    if spool_dir.is_dir():
+        for name in sorted(p.name for p in spool_dir.iterdir() if p.is_file() and p.name.endswith(".json")):
+            try:
+                event = json.loads((spool_dir / name).read_text(encoding="utf-8"))
+            except (OSError, json.JSONDecodeError):
+                continue
+            if not isinstance(event, dict):
+                continue
+            event_id = event.get("event_id")
+            if event_id is not None:
+                if event_id in seen_ids:
+                    continue
+                seen_ids.add(event_id)
+            events.append(event)
+
+    def _sort_key(item):
+        idx, event = item
         try:
-            p.unlink()
-        except OSError:
-            pass
-        drained += 1
+            return (0, _parse_iso_dt(event.get("timestamp")).timestamp())
+        except CorruptStateError:
+            return (1, idx)
 
-    return drained
+    indexed = sorted(enumerate(events), key=_sort_key)
+    return [event for _, event in indexed]
 
 
 def emit_event(
@@ -721,15 +1131,30 @@ def emit_event(
     event_log_ref: str | None = None, *,
     now: datetime | None = None, root: str | None = None,
 ) -> str:
+    """Commit an event, then best-effort fold it (and anything else
+    pending) into the NDJSON. See the module section header above and
+    docs/PHASE3-DESIGN.md section 1.10 REVISED for the full design.
+
+    EventCommitError is raised ONLY if the event fails schema validation,
+    or if the durable pending-file commit itself fails -- never because of
+    a drain failure (drain is best-effort; the event is already safely
+    committed by the time drain is attempted)."""
     resolved_now = _now(now)
 
-    # 1. Drain first.
-    drain_event_spool(project_id, root=root)
+    # event_id: digits-only composite of wall-clock time_ns + pid + a
+    # per-process monotonic counter (Finding 1b). time.time_ns() is the
+    # REAL clock, independent of any injected `now` -- this is what fixes
+    # the cross-process collision the old `next(_EVENT_SEQ)`-only scheme
+    # had, since two processes given the same injected --now used to mint
+    # identical ids. The trailing _EVENT_SEQ counter additionally guards
+    # against two threads in the same process observing an identical
+    # time_ns() value. Still matches schema pattern ^e-[0-9TZ:.+-]+-[0-9]+$
+    # (digits-only after the final hyphen).
+    event_id = f"e-{resolved_now.isoformat()}-{time.time_ns()}{os.getpid()}{next(_EVENT_SEQ)}"
 
-    # 2. Build & validate.
     event = {
         "protocol_version": "1.0",
-        "event_id": f"e-{resolved_now.isoformat()}-{next(_EVENT_SEQ)}",
+        "event_id": event_id,
         "type": type,
         "actor": actor,
         "timestamp": resolved_now.isoformat(),
@@ -743,29 +1168,22 @@ def emit_event(
 
     errors = validate_obj(event, "event")
     if errors:
-        raise EventCommitError(f"event failed schema validation, not appended: {errors}")
+        raise EventCommitError(f"event failed schema validation, not committed: {errors}")
 
-    log_path = events_log_path(project_id, root=root)
-    line = json.dumps(event, ensure_ascii=False)
+    # Commit: this write IS the durability guarantee. If it fails, nothing
+    # happened and the caller sees EventCommitError (exit 5).
+    try:
+        spool_event(event, project_id, root=root)
+    except Exception as exc:
+        raise EventCommitError(f"failed to commit event to pending spool: {exc}") from exc
 
-    # 3. Append with <=1 retry, then spool.
-    appended = False
-    last_exc: Exception | None = None
-    for _attempt in range(2):
-        try:
-            _atomic_append_ndjson(log_path, line)
-            appended = True
-            break
-        except Exception as exc:
-            last_exc = exc
+    # Best-effort drain. Never raises: a drain failure here leaves the
+    # event exactly where it already durably is (pending), for the next
+    # successful drain to fold in. Still surfaced loudly on stderr so a
+    # persistent drain problem isn't silent.
+    try:
+        drain_event_spool(project_id, root=root, now=resolved_now)
+    except Exception as exc:
+        print(f"WARNING: drain_event_spool failed (event already committed to pending): {exc}", file=sys.stderr)
 
-    if not appended:
-        try:
-            spool_event(event, project_id, root=root)
-        except Exception as spool_exc:
-            # 4. EventCommitError only if both append and spool fail.
-            raise EventCommitError(
-                f"failed to append ({last_exc}) and failed to spool ({spool_exc})"
-            ) from spool_exc
-
-    return event["event_id"]
+    return event_id

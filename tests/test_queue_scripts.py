@@ -314,8 +314,14 @@ class LeaseTaskContestedTests(ScriptTestBase):
         t.start()
         time.sleep(0.3)
         locks_dir.mkdir(parents=True, exist_ok=True)
+        # A real OneDrive conflict-copy is a literal content duplicate of
+        # the original lock file, so it carries the same task_ref
+        # (Finding 2, adversarial review: _scan_for_conflicts now reads
+        # task_ref to distinguish a genuine conflict-copy of THIS task
+        # from an unrelated sibling task's own lock).
         (locks_dir / "t-lease-contested-FOREIGNHOST.lock").write_text(
-            json.dumps({"holder": "cowork", "session": "other"}), encoding="utf-8"
+            json.dumps({"task_ref": "t-lease-contested", "holder": "cowork", "session": "other"}),
+            encoding="utf-8",
         )
         t.join(timeout=15)
 
@@ -730,6 +736,141 @@ class ExpireLeasesReclaimTests(ScriptTestBase):
         self.assertEqual(self.events(), [])
 
 
+class ExpireLeasesConcurrentSweepRaceTests(ScriptTestBase):
+    """Finding 3 (adversarial review): a concurrent second sweep reclaiming
+    the SAME lock hits archive_lock's os.replace on a lock file another
+    sweep already moved -> uncaught FileNotFoundError (main() only caught
+    aaos.AaosError, so it propagated as a raw traceback). Simulates the
+    reviewer's exact race: after reclaim_decision says reclaimable but
+    before archive_lock actually runs, the lock file vanishes out from
+    under this sweep (as it would if a concurrent sweep had already
+    archived it) -- via a wrapper around aaos.archive_lock that
+    deletes-then-calls, per the task's own suggested repro."""
+
+    def _patch_archive_lock_to_delete_first(self, module):
+        original_archive_lock = module.aaos.archive_lock
+
+        def _delete_then_archive(lock_arg, **kwargs):
+            try:
+                Path(lock_arg).unlink()
+            except OSError:
+                pass
+            return original_archive_lock(lock_arg, **kwargs)
+
+        module.aaos.archive_lock = _delete_then_archive
+        return original_archive_lock
+
+    def test_lock_vanishing_before_archive_does_not_crash_or_duplicate_lease_expired(self):
+        lease = _expired_lease(holder="cowork", session="old-sess", now=NOW)
+        self.seed_task("t-expire-race", state="leased", lease=lease)
+        lock_file = aaos.lock_path("t-expire-race", PROJECT, root=str(self.root))
+        aaos.save_json(lock_file, {**lease, "task_ref": "t-expire-race", "protocol_version": "1.0"})
+
+        module = load_tool("expire-leases.py")
+        original_archive_lock = self._patch_archive_lock_to_delete_first(module)
+        try:
+            code, out = self.run_tool("expire-leases.py", "--now", _iso(NOW))
+        finally:
+            module.aaos.archive_lock = original_archive_lock
+
+        self.assertEqual(code, 0, out)
+        self.assertNotIn("Traceback", out)
+
+        task = self.reload_task("t-expire-race")
+        self.assertEqual(task["state"], "queued")
+        self.assertNotIn("lease", task)
+
+        # Exactly one LeaseExpired -- the reclaim transaction's own
+        # commit, which had already succeeded before the (simulated)
+        # concurrent sweep's archive removed the lock file.
+        self.assertEqual(self.count_events("LeaseExpired"), 1)
+
+    def test_dead_agent_escalated_survives_archive_failure(self):
+        lease = _expired_lease(holder="cowork", session="old-sess", now=NOW)
+        self.seed_task("t-expire-race-dead", state="leased", lease=lease)
+        lock_file = aaos.lock_path("t-expire-race-dead", PROJECT, root=str(self.root))
+        aaos.save_json(lock_file, {**lease, "task_ref": "t-expire-race-dead", "protocol_version": "1.0"})
+        aaos.save_json(aaos.heartbeat_path(root=str(self.root)), {
+            "protocol_version": "1.0",
+            "derived_at": _iso(NOW),
+            "agents": [{
+                "agent_id": "cowork", "last_run": _iso(NOW - timedelta(hours=20)),
+                "source": ["test"], "status": "missed", "threshold_hours": 16,
+            }],
+        })
+
+        module = load_tool("expire-leases.py")
+        original_archive_lock = self._patch_archive_lock_to_delete_first(module)
+        try:
+            code, out = self.run_tool("expire-leases.py", "--now", _iso(NOW))
+        finally:
+            module.aaos.archive_lock = original_archive_lock
+
+        self.assertEqual(code, 0, out)
+        self.assertEqual(self.count_events("LeaseExpired"), 1)
+        # The DeadAgent Escalated must not be lost just because the lock
+        # file itself could no longer be moved to _archive/.
+        self.assertEqual(self.count_events("Escalated"), 1)
+        escalated = [e for e in self.events() if e["type"] == "Escalated"][0]
+        self.assertEqual(escalated.get("detail"), "DeadAgent")
+
+    def test_lock_already_gone_before_transaction_starts_is_skipped_silently(self):
+        """The (a) pre-check: if the lock is ALREADY gone by the time this
+        sweep reaches the reclaim transaction (a fully-concurrent sweep
+        already won), skip without starting a redundant reclaim at all --
+        no LeaseExpired, no state churn, no crash. Simulates the narrow
+        real window where a winning sweep's commit_state_change (task ->
+        queued) has already landed but its archive_lock hasn't happened
+        yet, by deleting the lock file as a side effect of THIS sweep's
+        own initial read of it."""
+        lease = _expired_lease(holder="cowork", session="old-sess", now=NOW)
+        self.seed_task("t-expire-already-gone", state="queued")  # as if already reclaimed by "the winner"
+        lock_file = aaos.lock_path("t-expire-already-gone", PROJECT, root=str(self.root))
+        aaos.save_json(lock_file, {**lease, "task_ref": "t-expire-already-gone", "protocol_version": "1.0"})
+
+        module = load_tool("expire-leases.py")
+        original_load_json = module.aaos.load_json
+
+        def _load_then_vanish(path, *a, **kw):
+            result = original_load_json(path, *a, **kw)
+            if str(path) == str(lock_file):
+                try:
+                    lock_file.unlink()
+                except OSError:
+                    pass
+            return result
+
+        module.aaos.load_json = _load_then_vanish
+        try:
+            code, out = self.run_tool("expire-leases.py", "--now", _iso(NOW))
+        finally:
+            module.aaos.load_json = original_load_json
+
+        self.assertEqual(code, 0, out)
+        self.assertEqual(self.count_events("LeaseExpired"), 0)
+        task = self.reload_task("t-expire-already-gone")
+        self.assertEqual(task["state"], "queued")
+
+    def test_unexpected_exception_exits_nonzero_not_raw_traceback(self):
+        """(d): main()'s outer catch used to only cover aaos.AaosError
+        subclasses -- any other exception (this Finding's own raw
+        FileNotFoundError included) propagated straight out of main(),
+        crashing a scheduled sweep instead of exiting cleanly non-zero."""
+        module = load_tool("expire-leases.py")
+        original_load_heartbeat = module.aaos.load_heartbeat
+
+        def _boom(*a, **kw):
+            raise RuntimeError("simulated totally unexpected failure")
+
+        module.aaos.load_heartbeat = _boom
+        try:
+            code, out = self.run_tool("expire-leases.py", "--now", _iso(NOW))
+        finally:
+            module.aaos.load_heartbeat = original_load_heartbeat
+
+        self.assertNotEqual(code, 0)
+
+
 class ExpireLeasesDryRunTests(ScriptTestBase):
     def test_dry_run_makes_zero_changes(self):
         lease = _expired_lease(holder="cowork", session="old", now=NOW)
@@ -745,6 +886,47 @@ class ExpireLeasesDryRunTests(ScriptTestBase):
         self.assertEqual(task["state"], "leased")
         self.assertTrue(lock_file.exists())
         self.assertEqual(self.events(), [])
+
+    def test_dry_run_with_nonempty_spool_still_makes_zero_writes(self):
+        """Finding 4 (adversarial review): the OLD code drained the event
+        spool unconditionally, before the --dry-run check -- so a dry-run
+        preview with events already sitting in the spool (left over from a
+        prior contended emit) silently wrote them into the durable NDJSON,
+        breaking --dry-run's "zero writes" promise. This is the specific
+        case the reviewer's probe broke; the empty-spool case above already
+        passed even pre-fix."""
+        lease = _expired_lease(holder="cowork", session="old", now=NOW)
+        self.seed_task("t-expire-dryrun-spool", state="leased", lease=lease)
+        lock_file = aaos.lock_path("t-expire-dryrun-spool", PROJECT, root=str(self.root))
+        aaos.save_json(lock_file, {**lease, "task_ref": "t-expire-dryrun-spool", "protocol_version": "1.0"})
+
+        # Seed a pending spooled event, simulating a prior contended emit.
+        spool_event = {
+            "protocol_version": "1.0", "event_id": "e-2026-07-09T00:00:00Z-1",
+            "type": "TaskCreated", "actor": "system", "project_id": PROJECT,
+            "timestamp": _iso(NOW), "refs": {"task": "t-spooled-leftover"},
+        }
+        aaos.spool_event(spool_event, PROJECT, root=str(self.root))
+
+        tree_before = sorted(
+            (str(p.relative_to(self.root)), p.stat().st_mtime_ns)
+            for p in self.root.rglob("*") if p.is_file()
+        )
+
+        code, out = self.run_tool("expire-leases.py", "--dry-run", "--now", _iso(NOW))
+        self.assertEqual(code, 0, out)
+
+        tree_after = sorted(
+            (str(p.relative_to(self.root)), p.stat().st_mtime_ns)
+            for p in self.root.rglob("*") if p.is_file()
+        )
+        self.assertEqual(tree_before, tree_after, "dry-run must make ZERO filesystem writes, including draining")
+
+        # The spooled event is still exactly where it was -- not folded in.
+        ndjson_path = aaos.events_log_path(PROJECT, root=str(self.root))
+        self.assertFalse(ndjson_path.exists())
+        pending = list(aaos.event_spool_dir(PROJECT, root=str(self.root)).glob("*.json"))
+        self.assertEqual(len(pending), 1)
 
 
 class ExpireLeasesCorruptLockTests(ScriptTestBase):

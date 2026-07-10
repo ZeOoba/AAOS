@@ -36,7 +36,6 @@ Exit codes: see docs/PHASE3-DESIGN.md section 0.4.
 from __future__ import annotations
 
 import argparse
-import json
 import sys
 from datetime import datetime
 
@@ -89,20 +88,11 @@ def build_arg_parser() -> argparse.ArgumentParser:
 
 
 def _prior_failed_exists(project, task_id, root) -> bool:
-    """Drain the spool first (belt-and-suspenders, matching
-    expire-leases.py's startup drain) so a still-spooled prior Failed
-    event isn't missed by this scan."""
-    aaos.drain_event_spool(project, root=root)
-    log_path = aaos.events_log_path(project, root=root)
-    if not log_path.exists():
-        return False
-    for line in log_path.read_text(encoding="utf-8").splitlines():
-        if not line.strip():
-            continue
-        try:
-            rec = json.loads(line)
-        except json.JSONDecodeError:
-            continue
+    """Uses aaos.read_events (NDJSON + not-yet-drained pending events,
+    deduped by event_id -- see docs/PHASE3-DESIGN.md section 1.10 REVISED)
+    so a still-pending prior Failed event isn't missed by this scan even if
+    it hasn't been folded into the NDJSON yet."""
+    for rec in aaos.read_events(project, root=root):
         if rec.get("type") == "Failed" and rec.get("refs", {}).get("task") == task_id:
             return True
     return False

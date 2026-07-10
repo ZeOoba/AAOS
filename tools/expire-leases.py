@@ -98,7 +98,12 @@ def main(argv=None) -> int:
     resolved_now = _resolve_now(args.now)
 
     try:
-        aaos.drain_event_spool(args.project, root=args.seam_root)
+        if not args.dry_run:
+            # Gated behind dry-run (Finding 4, adversarial review): draining
+            # is a real write (folds spooled events into the NDJSON) --
+            # unconditional drain violated --dry-run's "zero writes" promise
+            # whenever a prior failure had left events spooled.
+            aaos.drain_event_spool(args.project, root=args.seam_root, now=resolved_now)
 
         locks_dir = aaos.project_dir(args.project, root=args.seam_root) / "locks"
         if not locks_dir.is_dir():
@@ -137,6 +142,20 @@ def main(argv=None) -> int:
                 _escalate_corrupt(args.project, args.seam_root, resolved_now, entry, args.dry_run)
                 continue
 
+            # Pre-check (Finding 3a, adversarial review): reclaim_decision
+            # was computed from the LOCK file alone. If a fully-concurrent
+            # sweep has already won the race and committed its own reclaim
+            # (task -> queued, lease dropped) between then and this load,
+            # the task on disk right now no longer reflects a live lease --
+            # proceeding would emit a redundant LeaseExpired for a lease
+            # that's already gone. Skip silently: no event, no state churn.
+            if task.get("state") not in ("leased", "in-progress") or "lease" not in task:
+                print(
+                    f"SKIP: {task_id} no longer leased (state={task.get('state')!r}); "
+                    "already reclaimed by a concurrent sweep"
+                )
+                continue
+
             new_task = dict(task)
             new_task["state"] = "queued"
             new_task.pop("lease", None)
@@ -154,7 +173,23 @@ def main(argv=None) -> int:
                 },
                 root=args.seam_root,
             )
-            aaos.archive_lock(entry, now=resolved_now)
+            try:
+                aaos.archive_lock(entry, now=resolved_now)
+            except OSError as exc:
+                # Finding 3b/3c (adversarial review): the reclaim transaction
+                # above already committed (task -> queued, LeaseExpired
+                # emitted) -- that's the correctness-bearing step and it's
+                # done. If a concurrent sweep (or anything else) already
+                # moved/removed this exact lock file before we got here,
+                # there is nothing left to archive; that is not a failure of
+                # THIS reclaim, so it must not crash the sweep, must not
+                # re-emit LeaseExpired, and must not skip the DeadAgent
+                # escalation below.
+                print(
+                    f"NOTE: lock {entry.name} already moved/removed "
+                    f"(concurrent sweep?) before archive could run ({exc}); "
+                    "reclaim already committed, continuing"
+                )
             print(f"RECLAIMED: {task_id} (lock={entry.name}, classification={decision.classification})")
 
             if decision.classification == "DeadAgent":
@@ -182,6 +217,17 @@ def main(argv=None) -> int:
     except aaos.EventCommitError as exc:
         print(f"EVENT COMMIT FAILURE: {exc}", file=sys.stderr)
         return 5
+    except Exception as exc:
+        # Finding 3d (adversarial review): the six explicit except clauses
+        # above only ever covered aaos.AaosError subclasses. Any OTHER
+        # exception (this Finding's own repro used a raw FileNotFoundError,
+        # but the class of bug is general) propagated straight out of
+        # main(), which means a scheduled run of this sweep would crash
+        # with a raw traceback instead of exiting cleanly non-zero. A
+        # best-effort sweep must never do that -- print a clear one-line
+        # message (no bare traceback dump) and fail the run visibly.
+        print(f"UNEXPECTED ERROR: {type(exc).__name__}: {exc}", file=sys.stderr)
+        return 1
 
 
 if __name__ == "__main__":
