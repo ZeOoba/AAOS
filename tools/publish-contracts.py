@@ -259,6 +259,16 @@ def main(argv=None) -> int:
             print(f"USAGE ERROR: missing required source file: {src}", file=sys.stderr)
         return 2
 
+    # Invalidate any prior success signal BEFORE copying, not after: if a
+    # write fails partway through the loop below, a stale-but-still-present
+    # PUBLISHED.json would otherwise keep telling readers (Probe S) that a
+    # (now Frankenstein, mixed old/new) mirror is trustworthy. Deleting it
+    # first means a crash mid-publish always leaves NO success signal --
+    # Probe S correctly fails closed instead of trusting stale bytes.
+    published_path = contracts_dir / "PUBLISHED.json"
+    if published_path.exists():
+        published_path.unlink()
+
     for src, dest in plan:
         aaos.atomic_write(dest, src.read_bytes())
 

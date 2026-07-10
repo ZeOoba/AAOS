@@ -1,0 +1,968 @@
+=== COMMITS (609a4b3..HEAD, i.e. all Phase 4 work) ===
+d13b155 Phase 4 Task 3: staged first cross-surface task + dry-run transcript
+065e09e Phase 4 Task 2: docs/CODE-ADAPTER.md and docs/COWORK-BOOTSTRAP.md
+69d748e Phase 4 Task 1: publish-contracts.py (TDD, 12 tests)
+609a4b3 Add Phase 4 implementation design (opus planning pass)
+
+=== DIFFSTAT ===
+ docs/CODE-ADAPTER.md                            |  30 ++
+ docs/COWORK-BOOTSTRAP.md                        | 112 +++++++
+ docs/PHASE4-DESIGN.md                           | 123 ++++++++
+ docs/_task-reports/phase4-dryrun-rehearsal.py   | 202 +++++++++++++
+ docs/_task-reports/phase4-dryrun-transcript.txt |  50 ++++
+ docs/_task-reports/phase4-task1-report.md       | 171 +++++++++++
+ tests/test_publish_contracts.py                 | 371 ++++++++++++++++++++++++
+ tools/publish-contracts.py                      | 284 ++++++++++++++++++
+ 8 files changed, 1343 insertions(+)
+
+=== FULL DIFF (U6) ===
+diff --git a/docs/CODE-ADAPTER.md b/docs/CODE-ADAPTER.md
+new file mode 100644
+index 0000000..fb96aa5
+--- /dev/null
++++ b/docs/CODE-ADAPTER.md
+@@ -0,0 +1,30 @@
++<!-- STAGED FILE — NOT AUTO-LOADED, NOT INSTALLED. -->
++<!-- The existence of this file changes no session's behavior. Gabriel pastes -->
++<!-- the relevant block into a Code session or a skill at his own discretion. -->
++<!-- Per Hard Constraint: nothing is silently installed. -->
++
++# AAOS Code Adapter
++
++How a Claude Code session joins the ORA Agent Coordination Layer as the `claude-code` agent. This page is pointer-first — mechanics live in `docs/AAOS-SPEC.md`, exit codes in `docs/PHASE3-DESIGN.md` §0.4, human-recovery procedures in `docs/OPERATIONS.md`. Read those, not a re-explanation here.
++
++## Preconditions
++- You are a `claude-code` session on the ORA workstation.
++- Tools: `C:/Users/Owner/AAOS/tools/*.py` (interpreter: `python`). Live seam: `C:/Users/Owner/OneDrive - Oxford Capital Partners/Claude_Workspace/AAOS/projects/ora-ops/`.
++- Every mutating call carries `--holder claude-code --session <your-session-id>` (a stable per-session string — e.g. this session's id).
++
++## The turn
++- **Check the queue** — list and read `…/projects/ora-ops/tasks/*.json`; pick the lowest-`priority` task with `state:"queued"` addressed to you (or `owner_agent:"unassigned"`). No dedicated list command by design — the human-facing view is the Notion mirror (`tools/project-notion.py`'s output), which is Derived, not authoritative.
++- **Lease** — `python tools/lease-task.py <task-id> --holder claude-code --session <s>`. Exit 0 = ACQUIRED, proceed. Exit 3 = DENIED (someone/something holds it — move on). **Exit 4 = CONTESTED — stop; this is already flagged via a `LeaseContested` event, do not retry blind.**
++- **Execute** — satisfy every item in `task.acceptance_criteria`; fetch `task.inputs[]` by their `ref` pointers (never embedded data).
++- **Hand off** (if passing work to another agent) — `python tools/post-handoff.py --id h-<slug> --task <task-id> --from claude-code --to <agent> --next-action "…" [--summary "…" | --summary-file <path>] [--artifact path=<p>]* [--holder claude-code --session <s>]`. Every `--artifact` path must fall inside claude-code's `write_scope` (`agent-registry.json`) or validation fails (the colonization guard). A `--blocker <str>` (repeatable) forces the task to `state:"blocked"`.
++- **Complete** — `python tools/complete-task.py <task-id> --holder claude-code --session <s> --evidence label=<l> ref=<r> [--evidence …]* [--archive]`. At least one `--evidence` is required (schema's "evidence before done" rule, enforced here, not by the schema). `--archive` folds the `done→archived` transition in — this is how a full lifecycle ends without an 8th script.
++- **Fail** — `python tools/fail-task.py <task-id> --holder claude-code --session <s> --reason "…" [--evidence …]*`.
++
++## Fail-closed reminders
++- Never hand-edit `…/events/aaos-events.ndjson` or any `.lock` file directly — every mutation goes through a tool.
++- A DENIED/CONTESTED/lease-lost (exit 3/4) result is a stop, not a retry loop — the ≤1-retry canon already lives inside the tools (`emit_event`'s append/spool retry).
++- Lease TTL is 45 minutes, not renewable via a dedicated CLI in v1 — a job that will overrun should be re-scoped into a smaller task rather than raced against expiry.
++- Every "done" claim carries the completing command's own stdout as evidence — never assert success from memory.
++
++## Escalation / recovery
++Breaking a stuck lock, archiving a task, or rolling back a protocol version → `docs/OPERATIONS.md` §2–4. Do not improvise a manual fix for something a documented procedure covers.
+diff --git a/docs/COWORK-BOOTSTRAP.md b/docs/COWORK-BOOTSTRAP.md
+new file mode 100644
+index 0000000..9f061ab
+--- /dev/null
++++ b/docs/COWORK-BOOTSTRAP.md
+@@ -0,0 +1,112 @@
++# AAOS Cowork Bootstrap
++
++## §0 — What this is
++
++You are a Claude Cowork session joining Oxford Realty Advisors' Agent Coordination Layer (AAOS) as the `cowork` agent. This document is self-contained — everything you need is either stated here or a file at a path given here. **Do the steps below in order. Do not improvise around a step that fails — fail closed and report (§3), never guess or proceed on an assumption.**
++
++## §1 — Constants
++
++- **Seam root:** `C:/Users/Owner/OneDrive - Oxford Capital Partners/Claude_Workspace/AAOS/`
++- **Project directory:** `<seam root>/projects/ora-ops/`, containing `tasks/`, `handoffs/`, `locks/` (with `locks/_archive/`), `events/aaos-events.ndjson`, `events/aaos-events.ndjson.pending/`
++- **Contracts mirror:** `<seam root>/contracts/` (schemas under `contracts/schemas/`, everything else flat, plus `contracts/templates/`)
++- **Git tree (may or may not be reachable from you — §2 finds out):** `C:/Users/Owner/AAOS/`
++- **Your agent id:** `cowork`. **Your write_scope** (from `agent-registry.json`): `…/Claude_Workspace/**` and `notion://**` only — you may never write anywhere else, including the git tree even if you can read it.
++
++## §2 — Capability-detection preamble (run first, every turn)
++
++Three probes, in order. Record the outcome of each — you will state them in your §9 report.
++
++**Probe S — Seam reachability (mandatory gate).** Read `<seam root>/contracts/PUBLISHED.json`. Not readable? Try `<seam root>/_seam-probe.md` as a fallback sentinel. **Neither readable → STOP at §3 now** ("not-found" or "permission" class, whichever applies). `PUBLISHED.json` readable but `protocol_version` is not `"1.0"` → **STOP at §3** ("malformed" class — protocol mismatch).
++
++**Probe G — Contracts source.** Try reading `C:/Users/Owner/AAOS/schemas/task.schema.json` (the git tree) as a plain file. Succeeds → `CONTRACTS_SOURCE = git-tree` (read your contracts from there for the rest of this turn — it's the freshest copy). Fails → `CONTRACTS_SOURCE = seam-mirror` (read from `<seam root>/contracts/` instead). If `CONTRACTS_SOURCE` resolves to `seam-mirror` but `<seam root>/contracts/schemas/` is missing or its files don't parse → **STOP at §3** ("malformed" — no usable schemas anywhere).
++
++**Probe X — Execution.** Attempt this exact command as a real subprocess/shell invocation, if you have any facility to run one:
++```
++python "C:/Users/Owner/AAOS/tools/validate.py" "<seam root>/contracts/agent-registry.json" --schema agent-registry
++```
++Exit code `0` → `MODE = FULL-EXEC`. Anything else — non-zero exit, an error, or no shell/Python facility available to you at all — → `MODE = SAFE-BY-HAND`. **Do not guess your own mode from general knowledge of what Cowork sessions can do — actually attempt the command and observe the real result.** If you have no way to attempt it at all (no code-execution tool exposed to you in this session), that itself means `MODE = SAFE-BY-HAND` — record that plainly rather than skipping the probe.
++
++You now have `MODE` and `CONTRACTS_SOURCE`. State both explicitly in your §9 report — a human reading your report must be able to tell which path you took without re-deriving it.
++
++## §3 — Seam unreadable → stop, fail closed
++
++Three failure classes. On any of them: **write nothing, take no protocol action, stop, and report** using the template below.
++
++- **not-found** — the expected path simply doesn't exist (seam not synced yet, or `contracts/` never published).
++- **permission** — the path exists but reading it errors.
++- **malformed** — the path reads but doesn't parse as JSON / valid content, or a `protocol_version` doesn't match `"1.0"`, or a specific task/handoff you were told to act on won't parse.
++
++**Report template (state this to the human/session that invoked you — never send it externally):**
++> `AAOS STOP (fail-closed). Could not proceed: <path> — <not-found | permission-denied | malformed: <detail>>. Expected: <what you were trying to read/do>. I have written nothing and taken no protocol action. Resolve the seam/contracts and re-invoke.`
++
++## §4 — Read the contracts
++
++From `CONTRACTS_SOURCE` (§2), read:
++- `AAOS-SPEC.md` — the model. Read it before doing anything else below; it explains the state machine, the schemas, and why the rules in §7–§8 exist, not just what they are.
++- `schemas/handoff.schema.json` and `schemas/event.schema.json` — the exact shapes you will write against in §7.
++- `agent-registry.json` — confirms your own `write_scope` and every valid agent id (so `to_agent`/`from_agent` values you write are real).
++- `templates/handoff.template.json` — a filled, schema-valid example handoff to pattern-match against.
++
++Any of these missing/unparseable under your resolved `CONTRACTS_SOURCE` → §3 stop.
++
++## §5 — Read the queue
++
++List `<seam root>/projects/ora-ops/tasks/`. Read each task; find the one addressed to you — `owner_agent:"cowork"` — or read `<seam root>/projects/ora-ops/handoffs/` for one with `to_agent:"cowork"`. Read that handoff in full, and read any file its `artifact_manifest[].path` points to. **If the specific task/handoff you were invoked to act on is missing or malformed → §3 stop**, naming exactly which file.
++
++## §6 — Execute the turn (branch on `MODE`)
++
++- **`MODE = FULL-EXEC`:** run the real tools, exactly as the Code adapter does, with `--holder cowork --session <your-cowork-session-id>`: `lease-task.py` → do the work → `post-handoff.py` and/or `complete-task.py`/`fail-task.py`. Full parity with Code; §7–§8 below do not apply to you in this mode.
++- **`MODE = SAFE-BY-HAND`:** proceed to §7 only. Do not attempt any operation not listed there.
++
++## §7 — SAFE-BY-HAND write recipes
++
++**Governing rule, memorize it exactly:** *you may READ anything; you may WRITE only by creating a brand-new file at an id/name you invent that nobody else will ever write to; you may never edit an existing shared file in place, and you may never create a file at a predictable, contested name (a lock).* Every new file you write, you self-check field-by-field against its schema before treating the write as final — get the shape right by hand since no validator is available to you in this mode.
++
++**Recipe 1 — Post a return handoff.** Write `<seam root>/projects/ora-ops/handoffs/h-<your-fresh-slug>.json` (pick a slug nobody else has used — include a random suffix if unsure) with exactly these fields (`handoff.schema.json`'s `required` set, `additionalProperties:false` — no extra fields):
++```json
++{
++  "protocol_version": "1.0",
++  "id": "h-<your-fresh-slug>",
++  "project_id": "ora-ops",
++  "task_ref": "<the task id you're responding to>",
++  "from_agent": "cowork",
++  "to_agent": "<usually claude-code>",
++  "artifact_manifest": [],
++  "context_summary": "<<=300 words, pointer-first: what you read and concluded, not embedded data>",
++  "required_next_action": "<what the receiver should do next>",
++  "blockers": [],
++  "posted_at": "<ISO-8601 now, e.g. 2026-07-10T14:00:00-04:00>"
++}
++```
++**Keep `artifact_manifest` empty and `blockers` empty, always, in this mode** — see §8 for why. `id` must match `^h-[a-z0-9-]+$`. Never write to a `handoffs/<id>.json` path that already exists (write-once — pick a new id instead).
++
++**Recipe 2 — Emit the paired event (spool file only).** Write ONE new file at `<seam root>/projects/ora-ops/events/aaos-events.ndjson.pending/<sortable-timestamp>-cowork-<random>.json` (e.g. `20260710T140005123456-cowork-a1b2.json` — the point is a unique, sortable name; do not overwrite an existing spool file) containing exactly one JSON object:
++```json
++{
++  "protocol_version": "1.0",
++  "event_id": "e-<ISO now>-<random digits>",
++  "type": "HandoffPosted",
++  "actor": "cowork",
++  "timestamp": "<same ISO now>",
++  "project_id": "ora-ops",
++  "refs": {"task": "<task id>", "handoff": "<the handoff id from Recipe 1>"}
++}
++```
++`event_id` must match `^e-[0-9TZ:.+-]+-[0-9]+$` — a real ISO timestamp followed by `-` and digits only (no letters) for the tail. `type` must be one of the fixed set in `event.schema.json` (`TaskCreated, TaskLeased, LeaseRenewed, LeaseExpired, LeaseDenied, LeaseContested, HandoffPosted, Blocked, Completed, Failed, HeartbeatMissed, Escalated, Archived`) — you will almost always use `HandoffPosted`. **Never open `aaos-events.ndjson` itself and never append a line to it.** Dropping this file in `…pending/` *is* the durable, committed record — a Code session's next drain folds it into the shared log under a lock you don't need to worry about.
++
++**Recipe 3 — Create a brand-new task (rare in v1, but safe).** Same governing rule: pick a fresh `t-<slug>` id nobody else has used, write it once to `tasks/<id>.json` per `task.schema.json` with `state:"queued"`, `owner_agent` set appropriately, `acceptance_criteria` non-empty. Pair it with a `TaskCreated` spool event (Recipe 2's shape, `type:"TaskCreated"`, `refs:{"task": "<id>"}`).
++
++## §8 — What you must NOT do by hand (one honest reason each)
++
++- **Create or edit a `.lock` file.** Exactly-one-winner leasing needs an OS-level exclusive-create you don't have — a hand-written lock is last-write-wins, which is precisely the double-lease corruption AAOS exists to prevent.
++- **Edit an existing `tasks/*.json` in place** (including to set it `leased`, `done`, `failed`, or `blocked`). It's a shared file with a single legitimate writer at a time (whoever holds its lease); your edit could silently clobber a concurrent legitimate writer. This is also why Recipe 1 always leaves `blockers: []` — setting a blocker is defined as forcing the referenced task to `state:"blocked"`, which is exactly this forbidden shared-file mutation.
++- **Attempt `lease-task`, `complete-task`, `fail-task`, or `expire-leases` "by hand."** Each requires either the exclusive-create primitive above, or `assert_lease_held` (a check you cannot have legitimately satisfied without having run the real lease-acquire code), or is a fleet-wide concurrency-critical sweep that is Code's/the scheduler's job, never an individual turn's.
++- **Append to `aaos-events.ndjson` directly**, even if it looks like "just adding a line" — two writers appending near-simultaneously can silently clobber each other's line (this was a real bug found and fixed in Phase 3). The spool file (Recipe 2) is the only safe path.
++- **Edit `_seam-probe.md` in place.** It's a shared file too. Your Recipe-1 return handoff, referencing that you read it, *is* the machine-checkable proof that the seam works both ways — a human or Code session transcribes that confirmation elsewhere; you don't edit the probe file yourself.
++- **List an artifact path outside `…/Claude_Workspace/**` or `notion://**`** in any manifest — that's outside your `write_scope` and would fail the colonization guard if a validator ever checked it (none does in this mode, so the discipline is on you).
++
++**If your assigned work genuinely requires one of the above:** post a handoff back to `claude-code` (Recipe 1) describing exactly what needs doing and why you can't do it yourself, and stop there. That is the *correct* outcome in this mode, not a failure to work around.
++
++## §9 — Report back
++
++End every turn stating, plainly: the resolved `MODE` and `CONTRACTS_SOURCE`; what you read; the exact paths of any new files you wrote; and any §3 stop or §8 deferral, with the reason. This report is internal — read by the human or the next session — never an external send.
+diff --git a/docs/PHASE4-DESIGN.md b/docs/PHASE4-DESIGN.md
+new file mode 100644
+index 0000000..3502b3d
+--- /dev/null
++++ b/docs/PHASE4-DESIGN.md
+@@ -0,0 +1,123 @@
++# AAOS Phase 4 — Agent Integration: Implementation Design
++
++**Status:** implementation-level design, produced by an opus-tier planning pass before any Phase 4 file was written. This is the single source of truth for Phase 4's adapter content, the `publish-contracts` script, the first staged cross-surface task, and the dry-run checklist.
++
++## 1. Problem C resolution — Cowork's code-execution capability
++
++### 1.1 The core reasoning
++
++Two facts from Phase 3 decide everything downstream:
++
++1. **The safety guarantees are OS primitives, not conventions.** Exactly-one-winner leasing depends on `O_EXCL` atomic exclusive-create of a *predictable* filename (`locks/<task-id>.lock`); race-free event capture depends on writing a *uniquely-named* file that no other writer will ever pick (`…pending/<time_ns>-<pid>-<uuid>.json`). A model-facing "write this file" tool exposes neither `O_EXCL` nor an atomic compare-and-swap. Therefore **any hand-written mutation of a shared, predictably-named file cannot honestly claim the Phase-3-proven guarantee**, but **any hand-written creation of a fresh, uniquely-named file that nobody else will ever write is safe by construction** — there is no contention to lose.
++2. **The tools live in the git tree.** To "run the real tools like Code," a Cowork-spawned process must be able to read `C:\Users\Owner\AAOS\tools\` and `\schemas\`. So the real capability test is not "can Cowork run Python" in the abstract — it is "can Cowork successfully invoke a real AAOS tool against the real seam." One probe settles the whole question.
++
++This collapses the branch space: the **behavioral** fork is EXEC vs NO-EXEC; the git-tree-read probe only decides *where Cowork reads its contracts from*, not *what it may write*.
++
++### 1.2 The capability-detection preamble (exact steps Cowork runs first)
++
++Run in order, top of every Cowork turn, before any protocol action:
++
++- **Probe S — Seam reachability (mandatory gate).** Attempt to read `C:/Users/Owner/OneDrive - Oxford Capital Partners/Claude_Workspace/AAOS/contracts/PUBLISHED.json`. If absent, try `…/AAOS/_seam-probe.md` as a fallback sentinel. If **neither** is readable → **STOP, fail closed** (§3 of the bootstrap). If `PUBLISHED.json` reads but `protocol_version != "1.0"` → STOP (protocol mismatch).
++- **Probe G — Contracts source.** Attempt a plain file-read of `C:/Users/Owner/AAOS/schemas/task.schema.json` (git tree). Success → `CONTRACTS_SOURCE = git-tree` (freshest, authoritative). Failure → `CONTRACTS_SOURCE = seam-mirror` (`…/AAOS/contracts/`). If Probe S found `PUBLISHED.json` but the seam `contracts/schemas/` are missing/malformed AND the git tree is unreadable → STOP (no usable schemas).
++- **Probe X — Execution.** Attempt a **read-only** real-tool invocation:
++  `python "C:/Users/Owner/AAOS/tools/validate.py" "C:/Users/Owner/OneDrive - Oxford Capital Partners/Claude_Workspace/AAOS/contracts/PUBLISHED.json" --schema agent-registry` — *(decoupled from any specific demo task per the open item below — probing against the stable `PUBLISHED.json`/registry rather than a task that might later be archived/renamed)*.
++  Exit 0 → `MODE = FULL-EXEC` (proves shell + git-tree-readable-by-that-process + jsonschema + `_aaos_common` all work, and it mutated nothing). Any failure, unavailability, or absence of a shell facility → `MODE = SAFE-BY-HAND`.
++
++**Do not assume MODE.** The bootstrap requires Cowork to *state which mode and source it resolved to* in its turn report, so a human can see whether the optimistic or the restricted path ran.
++
++### 1.3 Branch-by-branch behavior
++
++- **`MODE = FULL-EXEC`** (Probe X passed): Cowork uses the real tools **exactly like Code** — `lease-task.py`, `complete-task.py`, `post-handoff.py`, `emit-event.py`, etc., with `--holder cowork --session <cowork-session-id>`. Problem C's hard parts evaporate; the full turn is available. Cowork still reads contracts from `CONTRACTS_SOURCE` for its own briefing but the tools use the git tree directly.
++- **`MODE = SAFE-BY-HAND`, `CONTRACTS_SOURCE = git-tree`**: Cowork reads schemas/spec directly from `C:/Users/Owner/AAOS/` (freshest) but **cannot run scripts** → restricted to the safe subset (§1.4).
++- **`MODE = SAFE-BY-HAND`, `CONTRACTS_SOURCE = seam-mirror`**: identical write behavior; Cowork reads schemas/spec from the seam `contracts/` mirror because the git tree is unreachable. This is the reason `publish-contracts` must exist.
++- **Seam unreadable** (Probe S fails): fail closed, report, write nothing.
++
++### 1.4 The safe-operation subset for the NO-EXEC case (the load-bearing answer)
++
++Governing rule Cowork is taught verbatim: **you may READ anything; you may only WRITE by creating a brand-new file at an id/name you invent that no other writer will ever touch; you may never hand-mutate an existing shared file, and you may never hand-create a predictably-named file another agent also races for (a lock).** Schema conformance for every new file is self-checked against the schema copy from `CONTRACTS_SOURCE` before the write is treated as final; because these are fresh-id new files (never mutations), a schema mistake harms nothing shared — the worst case is Code's `validate.py` rejecting Cowork's file at pickup and flagging it, never silent corruption of live state. That asymmetry is *why* new-file-by-hand is acceptable without a live validator and mutate-by-hand is not.
++
++Per-operation verdict:
++
++| Operation | Verdict | Reasoning |
++|---|---|---|
++| **create-task** | **SAFE-BY-HAND** (new-file) | Writes `tasks/<id>.json` at a Cowork-invented, collision-proof id (uuid-suffixed) + drops a `TaskCreated` spool event. New unique file → no contention; no shared state to corrupt. Not used in the v1 first task (Code stages it), but mechanically safe. |
++| **lease-task** | **UNSAFE-BY-HAND → SAFE-IF-SCRIPT-EXEC** | Requires `O_EXCL` create of the predictable `locks/<task-id>.lock` (exactly-one-winner) **and** in-place mutation of shared `task.json`. A hand-written lock is last-write-wins → double-lease, the precise corruption AAOS exists to prevent. Only safe via the real tool. |
++| **complete-task** | **UNSAFE-BY-HAND → SAFE-IF-SCRIPT-EXEC** | In-place mutation of shared `task.json` (state→done, drop lease, add evidence) + `assert_lease_held` (which Cowork can't have legitimately satisfied by hand) + lock archive. Shared-file mutation → defer. |
++| **fail-task** | **UNSAFE-BY-HAND → SAFE-IF-SCRIPT-EXEC** | Same shared-`task.json` in-place mutation + `Failed`/`Escalated` sequencing. Defer. |
++| **post-handoff** | **SAFE-BY-HAND** (new-file), with two carve-outs | Writes `handoffs/<id>.json` write-once at a fresh id → no contention. **Conditions:** (a) `artifact_manifest` empty (Cowork can't reliably compute `sha256`/`bytes` in no-exec mode, and every listed path must be inside cowork's `write_scope`); (b) schema-conformant by self-check. **Carve-out:** the `--blocker` path also mutates the shared task to `blocked` in place — that half is UNSAFE-BY-HAND-DEFER. So: post a handoff yes; force a task-blocked transition no. Emit the paired `HandoffPosted` via a spool file (below). |
++| **expire-leases** | **UNSAFE-BY-HAND → SAFE-IF-SCRIPT-EXEC** | A concurrency-critical sweep that mutates many `task.json` in place, archives locks, and serializes NDJSON writes behind the drain lock. Conceptually the fleet/Code's job, never Cowork's. Defer unconditionally. |
++| **emit-event** | **SAFE-BY-HAND *only* via the spool file; UNSAFE via direct NDJSON append** | Dropping a uniquely-named `…/events/aaos-events.ndjson.pending/<sortable-ts>-cowork-<uuid>.json` **is** the designed durable commit point — unique filename by construction, zero contention, and Code's next drain folds it into the NDJSON under the `O_EXCL` drain lock. Cowork must **never** append to `aaos-events.ndjson` directly (that is Finding 1's concurrent-append race). Event JSON self-checked against `event.schema.json`; `event_id` minted as `e-<cowork-ISO-now>-<random digits>` (schema pattern `^e-[0-9TZ:.+-]+-[0-9]+$`, digits-only tail). |
++
++Net: in NO-EXEC mode Cowork's toolbox is **read everything + create-task + post-handoff (empty manifest) + emit-event (spool only)** — read-heavy with new-file writes, exactly matching the master-prompt example's intended v1 scope. Everything that mutates shared state is deferred to a Code session or the fleet sweep.
++
++---
++
++## 2. `docs/CODE-ADAPTER.md` — content outline (git tree; ≤1 page; pointer-first)
++
++Staged file, **not** auto-loaded. Sections:
++- **Banner:** "STAGED — not installed."
++- **What/why + pointers** to `AAOS-SPEC.md`, `PHASE3-DESIGN.md` §0.4, `OPERATIONS.md`.
++- **Preconditions:** claude-code session, tools path, live seam path, `--holder claude-code --session <id>` on every mutating call.
++- **The turn:** check queue → lease → execute → hand off (if passing on) → complete/fail, one command per step.
++- **Fail-closed reminders:** never hand-edit the NDJSON; CONTESTED/DENIED is a stop not a loop; TTL 45min, no renew CLI in v1; evidence-before-done.
++- **Escalation pointer** to OPERATIONS.md §2–4.
++
++## 3. `docs/COWORK-BOOTSTRAP.md` — content outline (published to seam; fully self-contained)
++
++- **§0** What this is / how you got it; do steps in order; fail closed on any step that fails.
++- **§1** Constants: seam root, project dir, contracts dir, git tree (may be unreadable), your agent id `cowork`, your `write_scope`.
++- **§2** Capability-detection preamble: Probes S, G, X verbatim; resolution → `MODE` + `CONTRACTS_SOURCE`; state both in the end-of-turn report.
++- **§3** Seam-unreadable → stop, fail closed. Three failure classes (not-found / permission / malformed) each with the exact stop-and-report message template (internal only, never external).
++- **§4** Read the contracts from `CONTRACTS_SOURCE`: `AAOS-SPEC.md`, `handoff.schema.json`, `event.schema.json`, `agent-registry.json`, `templates/handoff.template.json`.
++- **§5** Read the queue: find the task/handoff addressed to `cowork`; §3-stop if missing/malformed.
++- **§6** Execute the turn, branch on `MODE` (FULL-EXEC: run the real tools; SAFE-BY-HAND: §7 only).
++- **§7** SAFE-BY-HAND write recipes: post a return handoff (exact field set, empty manifest, self-validate) + emit the paired event via the spool file only (never touch the NDJSON directly).
++- **§8** What you must NOT do by hand, one honest reason each: locks, in-place task edits, lease/complete/fail/expire by hand, direct NDJSON append, in-place `_seam-probe.md` edits.
++- **§9** Report back: `MODE`, `CONTRACTS_SOURCE`, what was read, what new files were written, any stop/blocker.
++
++## 4. `publish-contracts.py` — script design
++
++**Language: Python**, not the `.ps1` ADR-0002's illustrative tree named — every other tool is Python and reuses `_aaos_common.atomic_write` (the one write-rename idiom the whole codebase centralizes); a PowerShell script would reimplement it from scratch. ADR-0002 addendum records this as a naming reconciliation, not a silent deviation.
++
++**Copies** (git tree → seam `contracts/`, each via `atomic_write`): `schemas/*.schema.json` (5), `agent-registry.json`, `AAOS-SPEC.md`, `COWORK-BOOTSTRAP.md`, `templates/*`, plus a `PUBLISHED.json` stamp (`protocol_version`, `source_commit`, `generated_at`).
++
++**Not published:** `CODE-ADAPTER.md` (no Cowork consumer), `OPERATIONS.md` (its procedures are exactly the by-hand shared-state surgery §1.4/§8 forbid Cowork from doing — keep it git-only so it can't tempt an unsafe action), `NON-GOALS.md`/`V2-BACKLOG.md`/`adr/*`/`MIGRATIONS.md` (design rationale, not turn-execution inputs).
++
++**`source_commit`:** `git rev-parse HEAD` via subprocess; if `git status --porcelain` shows a dirty tree, stamp `"<hash>-dirty"` + `"dirty": true` (publishing from an uncommitted tree is normal — never fabricate a clean-hash provenance that doesn't match the published bytes). `--source-commit <sha>` override; if git is unavailable and no override given, **exit non-zero, publish nothing** (fail closed on provenance, never stamp unknown).
++
++**Pre-publish sanity:** validate `agent-registry.json` via `validate_obj(..., "agent-registry")` before copying — a malformed registry must never reach the seam. Idempotent; sole writer of `contracts/`.
++
++## 5. The first live cross-surface task — staged, not executed
++
++**Task:** close the still-open two-way seam confirmation (`_seam-probe.md` / BUILD-STATE item 1) — small, real, internal-only, reversible.
++
++**Staged via the real tools** (Code, this session):
++1. `create-task.py --id t-cowork-seam-confirm --owner cowork --priority 3 --title "Confirm two-way Code↔Cowork seam reachability" --accept "Cowork posts a return handoff from cowork→claude-code referencing this task" --accept "Cowork emits a HandoffPosted event for that return handoff" --accept "The return handoff validates against handoff.schema.json"`.
++2. `post-handoff.py --id h-code-to-cowork-seam-confirm --task t-cowork-seam-confirm --from claude-code --to cowork --summary "..." --next-action "Post return handoff h-cowork-seam-confirm-ack + its HandoffPosted spool event" --artifact path="…/AAOS/_seam-probe.md"`.
++
++**"Staged" means:** the task and handoff already exist on the seam, written via the real tools, awaiting a Cowork session to act — Cowork has not yet been invoked. (Not "just described in a doc" — that would leave the dry-run nothing real to check.)
++
++**Cowork's eventual turn (SAFE-BY-HAND):** reads spec + handoff + `_seam-probe.md`; writes `h-cowork-seam-confirm-ack.json` (empty manifest, confirming both-direction read); drops a `HandoffPosted` spool event. Realized as `HandoffPosted`, not `Completed` — emitting `Completed` while `task.json` still reads `queued` would be a dishonest event/state mismatch Cowork cannot safely produce by hand.
++
++**Rollback (Gate 4: "archive the task, no side effects"):** OPERATIONS.md §3, no new tooling — the task was never leased, so nothing to reclaim. Move `tasks/t-cowork-seam-confirm.json` → `_archive/`, move the handoff(s) → `_archive/`; the `TaskCreated`/`HandoffPosted` events stay in the NDJSON untouched (append-only history is "no side effects").
++
++## 6. Dry-run rehearsal — the checklist
++
++1. Probe S — read `contracts/PUBLISHED.json`; assert exists, parses, `protocol_version=="1.0"`.
++2. Probe G — read `schemas/task.schema.json` from the git tree; record `CONTRACTS_SOURCE`.
++3. Probe X — run `validate.py` against `contracts/PUBLISHED.json` (`--schema agent-registry`... see implementation note below); assert exit 0; record `MODE`.
++4. Contracts read — open `AAOS-SPEC.md`, `handoff.schema.json`, `event.schema.json`, `agent-registry.json`; assert parse + `cowork` write_scope present.
++5. Queue read — list `tasks/`; assert `t-cowork-seam-confirm.json` present, parses, `state=="queued"`, `owner_agent=="cowork"`.
++6. Handoff read — open `h-code-to-cowork-seam-confirm.json`; assert parses, `to_agent`/`task_ref` correct; verify artifact path + hash on disk.
++7. Input read — open `_seam-probe.md`; assert readable.
++8. Draft return handoff — construct in memory, self-check against schema; assert `handoffs/` writable via a create+delete temp sentinel.
++9. Draft event — construct in memory, self-check against schema; assert the pending dir writable via a create+delete temp sentinel.
++10. write_scope check — confirm the draft only touches `Claude_Workspace/**`, no out-of-scope artifact.
++11. Fail-closed rehearsal — point the reader at a missing/malformed `PUBLISHED.json`; confirm the §3 stop path triggers correctly; restore.
++12. Cleanliness assertion — no live artifacts created, all temp sentinels removed, `t-cowork-seam-confirm` still `queued`.
++
++Passing all twelve = Gate 4's "dry-run transcript shows every bootstrap step resolving against real files," first live task still staged, nothing installed into Cowork.
++
++## Implementation notes carried forward
++- Probe X's exact `validate.py` invocation needs a real target file: `PUBLISHED.json` doesn't itself have a dedicated schema (it's a `contracts/`-only stamp, not one of the five contracts). Simplest fix used in implementation: Probe X validates `contracts/agent-registry.json` with `--schema agent-registry` (published, stable, decoupled from the demo task) — updated in the bootstrap doc and the rehearsal accordingly.
++- Cowork `--session` identity convention in FULL-EXEC: use the Cowork session id string as-is (matches how Code uses its own session id).
+diff --git a/tests/test_publish_contracts.py b/tests/test_publish_contracts.py
+new file mode 100644
+index 0000000..15c80e8
+--- /dev/null
++++ b/tests/test_publish_contracts.py
+@@ -0,0 +1,371 @@
++"""
++tests/test_publish_contracts.py — tests for tools/publish-contracts.py.
++
++Written FIRST per AAOS TDD doctrine: at the point this file is authored,
++tools/publish-contracts.py does not exist yet, so every test here is
++expected to fail (via a loader error from _tool_loader.load_tool -- the
++target file does not exist) until the tool is implemented. See
++docs/PHASE4-DESIGN.md section 4 for the full script design these tests
++pin down.
++
++Source-tree fixture / design choice, documented per the task's "your
++choice, document it" latitude: publish-contracts.py's CLI deliberately
++has no --repo-root flag (docs/PHASE4-DESIGN.md section 4: this script
++publishes THIS repo, not an arbitrary tree -- that is a considered design
++decision, not an oversight). To exercise it against fake/incomplete
++source trees (a missing docs/COWORK-BOOTSTRAP.md, a malformed
++agent-registry.json, a dirty git working tree), these tests monkeypatch
++the loaded module's REPO_ROOT attribute before calling main(argv) --
++every path the script touches is computed by re-reading the REPO_ROOT
++module global at call time (never captured once at import time), so
++reassigning module.REPO_ROOT before each call works. See
++_FakeRepoTestBase below.
++
++--source-commit is passed explicitly in every test that isn't
++specifically exercising git derivation, to avoid needing a real
++throwaway git repo per test (the documented choice offered by the task).
++The git-dependent behaviors (dirty-tree "-dirty" stamping, clean-tree
++no-suffix stamping, git-unavailable fail-closed) ARE exercised against
++real throwaway git repos in GitDerivationTests below, since `git` is
++confirmed available in this dev environment (git version 2.55.0).
++
++Run with:  python -m unittest tests.test_publish_contracts -v
++       or: python -m unittest discover -s tests -p "test_*.py" -v
++"""
++from __future__ import annotations
++
++import contextlib
++import io
++import json
++import shutil
++import subprocess
++import sys
++import tempfile
++import time
++import unittest
++from datetime import datetime
++from pathlib import Path
++
++REPO_ROOT = Path(__file__).resolve().parent.parent
++TOOLS_DIR = REPO_ROOT / "tools"
++FIXTURES_DIR = Path(__file__).resolve().parent / "fixtures"
++
++if str(TOOLS_DIR) not in sys.path:
++    sys.path.insert(0, str(TOOLS_DIR))
++
++sys.path.insert(0, str(Path(__file__).resolve().parent))
++from _tool_loader import load_tool  # noqa: E402
++
++MODULE_FILENAME = "publish-contracts.py"
++
++VALID_REGISTRY_FIXTURE = FIXTURES_DIR / "agent-registry.json"
++CORRUPT_REGISTRY_FIXTURE = FIXTURES_DIR / "corrupt-registry.json"
++
++REQUIRED_SCHEMA_FILES = [
++    "agent-registry.schema.json",
++    "event.schema.json",
++    "handoff.schema.json",
++    "heartbeat.schema.json",
++    "task.schema.json",
++]
++
++
++def _build_fake_repo_tree(dest: Path, *, include_bootstrap=True, registry_src=VALID_REGISTRY_FIXTURE) -> None:
++    """Populate `dest` with a minimal-but-complete AAOS source tree:
++    schemas/*.schema.json (copied from the real repo -- schema DEFINITIONS
++    aren't what's under test here, and validate_obj always loads schemas
++    from _aaos_common.SCHEMA_DIR regardless of this script's own REPO_ROOT,
++    so reusing the real ones is both convenient and correct),
++    agent-registry.json (from the given fixture), docs/AAOS-SPEC.md
++    (copied from the real repo), docs/COWORK-BOOTSTRAP.md (a small
++    synthetic placeholder -- this file doesn't exist in the real repo yet,
++    per PHASE4-DESIGN.md's sibling-task note), and templates/* (copied
++    from the real repo).
++    """
++    (dest / "schemas").mkdir(parents=True, exist_ok=True)
++    for name in REQUIRED_SCHEMA_FILES:
++        shutil.copyfile(REPO_ROOT / "schemas" / name, dest / "schemas" / name)
++
++    shutil.copyfile(registry_src, dest / "agent-registry.json")
++
++    (dest / "docs").mkdir(parents=True, exist_ok=True)
++    shutil.copyfile(REPO_ROOT / "docs" / "AAOS-SPEC.md", dest / "docs" / "AAOS-SPEC.md")
++    if include_bootstrap:
++        (dest / "docs" / "COWORK-BOOTSTRAP.md").write_text(
++            "# Cowork Bootstrap (test fixture)\n\nSynthetic placeholder for tests.\n",
++            encoding="utf-8",
++        )
++
++    templates_src = REPO_ROOT / "templates"
++    templates_dest = dest / "templates"
++    templates_dest.mkdir(parents=True, exist_ok=True)
++    for f in templates_src.iterdir():
++        if f.is_file():
++            shutil.copyfile(f, templates_dest / f.name)
++
++
++class _FakeRepoTestBase(unittest.TestCase):
++    """Base fixture: a fake source tree (self.fake_repo) monkeypatched onto
++    the loaded publish-contracts module's REPO_ROOT, plus a fresh temp seam
++    root (self.seam_root). Subclasses may override `include_bootstrap` /
++    `registry_src` class attrs to build an intentionally-broken tree."""
++
++    include_bootstrap = True
++    registry_src = VALID_REGISTRY_FIXTURE
++
++    def setUp(self):
++        self.module = load_tool(MODULE_FILENAME)
++        self._orig_repo_root = self.module.REPO_ROOT
++
++        self._tmp = tempfile.mkdtemp(prefix="aaos-pc-test-")
++        self.fake_repo = Path(self._tmp) / "fake-repo"
++        self.seam_root = Path(self._tmp) / "seam"
++        self.fake_repo.mkdir(parents=True, exist_ok=True)
++        self.seam_root.mkdir(parents=True, exist_ok=True)
++
++        _build_fake_repo_tree(
++            self.fake_repo, include_bootstrap=self.include_bootstrap, registry_src=self.registry_src
++        )
++
++        self.module.REPO_ROOT = self.fake_repo
++
++    def tearDown(self):
++        self.module.REPO_ROOT = self._orig_repo_root
++        shutil.rmtree(self._tmp, ignore_errors=True)
++
++    def run_tool(self, *args):
++        buf_out, buf_err = io.StringIO(), io.StringIO()
++        with contextlib.redirect_stdout(buf_out), contextlib.redirect_stderr(buf_err):
++            code = self.module.main(list(args))
++        return code, buf_out.getvalue() + buf_err.getvalue()
++
++    @property
++    def contracts_dir(self) -> Path:
++        return self.seam_root / "contracts"
++
++
++class HappyPathTests(_FakeRepoTestBase):
++    def test_exit_0_and_all_files_copied_byte_identical(self):
++        code, out = self.run_tool("--seam-root", str(self.seam_root), "--source-commit", "deadbeef")
++        self.assertEqual(code, 0, out)
++
++        for name in REQUIRED_SCHEMA_FILES:
++            src = self.fake_repo / "schemas" / name
++            dest = self.contracts_dir / "schemas" / name
++            self.assertTrue(dest.exists(), f"{dest} missing")
++            self.assertEqual(dest.read_bytes(), src.read_bytes(), f"{name} content mismatch")
++
++        self.assertEqual(
++            (self.contracts_dir / "agent-registry.json").read_bytes(),
++            (self.fake_repo / "agent-registry.json").read_bytes(),
++        )
++        self.assertEqual(
++            (self.contracts_dir / "AAOS-SPEC.md").read_bytes(),
++            (self.fake_repo / "docs" / "AAOS-SPEC.md").read_bytes(),
++        )
++        self.assertEqual(
++            (self.contracts_dir / "COWORK-BOOTSTRAP.md").read_bytes(),
++            (self.fake_repo / "docs" / "COWORK-BOOTSTRAP.md").read_bytes(),
++        )
++
++    def test_templates_all_land_under_contracts_templates(self):
++        code, out = self.run_tool("--seam-root", str(self.seam_root), "--source-commit", "deadbeef")
++        self.assertEqual(code, 0, out)
++
++        src_names = sorted(p.name for p in (self.fake_repo / "templates").iterdir() if p.is_file())
++        self.assertTrue(src_names, "fixture template dir unexpectedly empty")
++        dest_dir = self.contracts_dir / "templates"
++        dest_names = sorted(p.name for p in dest_dir.iterdir() if p.is_file())
++        self.assertEqual(src_names, dest_names)
++        for name in src_names:
++            self.assertEqual(
++                (dest_dir / name).read_bytes(),
++                (self.fake_repo / "templates" / name).read_bytes(),
++            )
++
++    def test_published_json_shape(self):
++        code, out = self.run_tool("--seam-root", str(self.seam_root), "--source-commit", "deadbeef")
++        self.assertEqual(code, 0, out)
++
++        published = json.loads((self.contracts_dir / "PUBLISHED.json").read_text(encoding="utf-8"))
++        self.assertEqual(published["protocol_version"], "1.0")
++        self.assertEqual(published["source_commit"], "deadbeef")
++        self.assertIs(published["dirty"], False)
++        self.assertIsInstance(published["generated_at"], str)
++        datetime.fromisoformat(published["generated_at"])  # must parse as ISO-8601
++
++    def test_idempotent_rerun_byte_identical_except_generated_at(self):
++        code1, out1 = self.run_tool("--seam-root", str(self.seam_root), "--source-commit", "deadbeef")
++        self.assertEqual(code1, 0, out1)
++        published_1 = json.loads((self.contracts_dir / "PUBLISHED.json").read_text(encoding="utf-8"))
++
++        time.sleep(0.05)
++
++        code2, out2 = self.run_tool("--seam-root", str(self.seam_root), "--source-commit", "deadbeef")
++        self.assertEqual(code2, 0, out2)
++        published_2 = json.loads((self.contracts_dir / "PUBLISHED.json").read_text(encoding="utf-8"))
++
++        self.assertNotEqual(published_1["generated_at"], published_2["generated_at"])
++        self.assertEqual(published_1["source_commit"], published_2["source_commit"])
++        self.assertEqual(published_1["dirty"], published_2["dirty"])
++        self.assertEqual(published_1["protocol_version"], published_2["protocol_version"])
++
++        for name in REQUIRED_SCHEMA_FILES:
++            self.assertEqual(
++                (self.contracts_dir / "schemas" / name).read_bytes(),
++                (self.fake_repo / "schemas" / name).read_bytes(),
++            )
++        self.assertEqual(
++            (self.contracts_dir / "agent-registry.json").read_bytes(),
++            (self.fake_repo / "agent-registry.json").read_bytes(),
++        )
++
++
++class MissingSourceFileTests(_FakeRepoTestBase):
++    include_bootstrap = False  # simulate this task running before the sibling task writes COWORK-BOOTSTRAP.md
++
++    def test_missing_bootstrap_doc_exit_2_publishes_nothing(self):
++        code, out = self.run_tool("--seam-root", str(self.seam_root), "--source-commit", "deadbeef")
++        self.assertEqual(code, 2, out)
++        self.assertIn("COWORK-BOOTSTRAP.md", out)
++        self.assertFalse((self.contracts_dir / "PUBLISHED.json").exists())
++        # Fail-closed: nothing at all should have been copied, not even the
++        # files that DID exist and would otherwise have been fine.
++        self.assertFalse(self.contracts_dir.exists())
++
++    def test_rerunning_after_file_appears_just_works(self):
++        code, out = self.run_tool("--seam-root", str(self.seam_root), "--source-commit", "deadbeef")
++        self.assertEqual(code, 2, out)
++
++        (self.fake_repo / "docs" / "COWORK-BOOTSTRAP.md").write_text(
++            "# Cowork Bootstrap (now exists)\n", encoding="utf-8"
++        )
++
++        code2, out2 = self.run_tool("--seam-root", str(self.seam_root), "--source-commit", "deadbeef")
++        self.assertEqual(code2, 0, out2)
++        self.assertTrue((self.contracts_dir / "PUBLISHED.json").exists())
++
++
++class MalformedRegistryJsonTests(_FakeRepoTestBase):
++    registry_src = CORRUPT_REGISTRY_FIXTURE
++
++    def test_invalid_json_registry_exit_1_publishes_nothing(self):
++        code, out = self.run_tool("--seam-root", str(self.seam_root), "--source-commit", "deadbeef")
++        self.assertEqual(code, 1, out)
++        self.assertFalse((self.contracts_dir / "PUBLISHED.json").exists())
++        self.assertFalse(self.contracts_dir.exists())
++
++
++class SchemaInvalidRegistryTests(_FakeRepoTestBase):
++    def setUp(self):
++        super().setUp()
++        # Overwrite the (already-copied, valid-JSON) registry with JSON
++        # that parses fine but fails agent-registry.schema.json (missing
++        # the required "agents" field).
++        (self.fake_repo / "agent-registry.json").write_text(
++            json.dumps({"protocol_version": "1.0"}), encoding="utf-8"
++        )
++
++    def test_schema_invalid_registry_exit_1_publishes_nothing(self):
++        code, out = self.run_tool("--seam-root", str(self.seam_root), "--source-commit", "deadbeef")
++        self.assertEqual(code, 1, out)
++        self.assertFalse((self.contracts_dir / "PUBLISHED.json").exists())
++        self.assertFalse(self.contracts_dir.exists())
++
++
++class SourceCommitOverrideTests(_FakeRepoTestBase):
++    def test_override_used_verbatim_no_git_call_no_dirty_suffix(self):
++        # fake_repo here is NOT a git repo at all -- if the script made any
++        # git call despite the override, that call would fail (not a git
++        # repo) and this test would see a non-zero exit instead of 0.
++        code, out = self.run_tool(
++            "--seam-root", str(self.seam_root), "--source-commit", "my-custom-sha-value"
++        )
++        self.assertEqual(code, 0, out)
++        published = json.loads((self.contracts_dir / "PUBLISHED.json").read_text(encoding="utf-8"))
++        self.assertEqual(published["source_commit"], "my-custom-sha-value")
++        self.assertIs(published["dirty"], False)
++
++
++class GitDerivationTests(unittest.TestCase):
++    """Exercises real `git rev-parse HEAD` / `git status --porcelain`
++    derivation against throwaway git repos -- git is confirmed available
++    in this dev environment (git version 2.55.0.windows.2)."""
++
++    def setUp(self):
++        self.module = load_tool(MODULE_FILENAME)
++        self._orig_repo_root = self.module.REPO_ROOT
++        self._tmp = tempfile.mkdtemp(prefix="aaos-pc-git-test-")
++        self.seam_root = Path(self._tmp) / "seam"
++        self.seam_root.mkdir(parents=True, exist_ok=True)
++
++    def tearDown(self):
++        self.module.REPO_ROOT = self._orig_repo_root
++        shutil.rmtree(self._tmp, ignore_errors=True)
++
++    def run_tool(self, *args):
++        buf_out, buf_err = io.StringIO(), io.StringIO()
++        with contextlib.redirect_stdout(buf_out), contextlib.redirect_stderr(buf_err):
++            code = self.module.main(list(args))
++        return code, buf_out.getvalue() + buf_err.getvalue()
++
++    @property
++    def contracts_dir(self) -> Path:
++        return self.seam_root / "contracts"
++
++    def _init_git_repo(self, repo_dir: Path) -> str:
++        subprocess.run(["git", "init", "-q"], cwd=str(repo_dir), check=True)
++        subprocess.run(["git", "config", "user.email", "test@example.com"], cwd=str(repo_dir), check=True)
++        subprocess.run(["git", "config", "user.name", "AAOS Test"], cwd=str(repo_dir), check=True)
++        subprocess.run(["git", "add", "-A"], cwd=str(repo_dir), check=True)
++        subprocess.run(["git", "commit", "-q", "-m", "initial"], cwd=str(repo_dir), check=True)
++        result = subprocess.run(
++            ["git", "rev-parse", "HEAD"], cwd=str(repo_dir), capture_output=True, text=True, check=True
++        )
++        return result.stdout.strip()
++
++    def test_clean_tree_no_dirty_suffix(self):
++        repo_dir = Path(self._tmp) / "clean-repo"
++        repo_dir.mkdir()
++        _build_fake_repo_tree(repo_dir)
++        sha = self._init_git_repo(repo_dir)
++
++        self.module.REPO_ROOT = repo_dir
++        code, out = self.run_tool("--seam-root", str(self.seam_root))
++        self.assertEqual(code, 0, out)
++
++        published = json.loads((self.contracts_dir / "PUBLISHED.json").read_text(encoding="utf-8"))
++        self.assertEqual(published["source_commit"], sha)
++        self.assertIs(published["dirty"], False)
++
++    def test_dirty_tree_stamps_dirty_suffix(self):
++        repo_dir = Path(self._tmp) / "dirty-repo"
++        repo_dir.mkdir()
++        _build_fake_repo_tree(repo_dir)
++        sha = self._init_git_repo(repo_dir)
++
++        # Dirty the tree with an untracked file (git status --porcelain
++        # reports untracked files too -- no need to modify a tracked one).
++        (repo_dir / "UNTRACKED_NOTE.txt").write_text("dirtying the tree\n", encoding="utf-8")
++
++        self.module.REPO_ROOT = repo_dir
++        code, out = self.run_tool("--seam-root", str(self.seam_root))
++        self.assertEqual(code, 0, out)
++
++        published = json.loads((self.contracts_dir / "PUBLISHED.json").read_text(encoding="utf-8"))
++        self.assertEqual(published["source_commit"], f"{sha}-dirty")
++        self.assertIs(published["dirty"], True)
++
++    def test_git_unavailable_not_a_repo_exit_2_publishes_nothing(self):
++        not_a_repo = Path(self._tmp) / "not-a-repo"
++        not_a_repo.mkdir()
++        _build_fake_repo_tree(not_a_repo)  # fully populated but NOT a git repo
++
++        self.module.REPO_ROOT = not_a_repo
++        code, out = self.run_tool("--seam-root", str(self.seam_root))
++        self.assertEqual(code, 2, out)
++        self.assertFalse(self.contracts_dir.exists())
++
++
++if __name__ == "__main__":
++    unittest.main()
+diff --git a/tools/publish-contracts.py b/tools/publish-contracts.py
+new file mode 100644
+index 0000000..c972802
+--- /dev/null
++++ b/tools/publish-contracts.py
+@@ -0,0 +1,284 @@
++#!/usr/bin/env python3
++"""
++tools/publish-contracts.py — publish the AAOS contracts (schemas, spec,
++registry, templates) from the git tree to the seam's read-only contracts/
++mirror.
++
++Usage:
++    python tools/publish-contracts.py [--seam-root <dir>] [--source-commit <sha>]
++
++See docs/PHASE4-DESIGN.md section 4 for the full design this implements.
++
++What gets copied (git tree REPO_ROOT -> <seam_root>/contracts/), each file
++via _aaos_common.atomic_write -- never written in place:
++    schemas/*.schema.json (all 5)          -> contracts/schemas/<name>.schema.json
++    agent-registry.json                    -> contracts/agent-registry.json
++    docs/AAOS-SPEC.md                      -> contracts/AAOS-SPEC.md
++    docs/COWORK-BOOTSTRAP.md               -> contracts/COWORK-BOOTSTRAP.md
++    templates/*                            -> contracts/templates/*
++    PUBLISHED.json (written LAST, only on full success)
++                                            -> contracts/PUBLISHED.json
++
++NOT published (docs/PHASE4-DESIGN.md section 4): CODE-ADAPTER.md (no
++Cowork consumer), OPERATIONS.md (its by-hand shared-state procedures are
++exactly what Cowork must never attempt -- keeping it git-only removes the
++temptation), NON-GOALS.md/V2-BACKLOG.md/adr/*/MIGRATIONS.md (design
++rationale, not turn-execution inputs).
++
++source_commit derivation: --source-commit, if given, is used VERBATIM (no
++git call is made at all, and "dirty" is stamped false since dirtiness was
++never checked in that path). Otherwise `git rev-parse HEAD` and
++`git status --porcelain` are run via subprocess with cwd=REPO_ROOT; a
++non-empty porcelain output stamps "<hash>-dirty" / dirty=true, a clean
++tree stamps "<hash>" / dirty=false. If git is unavailable, the tree isn't
++a git repo, or either command fails, and no --source-commit override was
++given, this fails closed: print a usage error and publish nothing
++(exit 2) -- never fabricate an unknown provenance.
++
++Pre-publish sanity: agent-registry.json is loaded (parsed ourselves, not
++just checked-for-existence) and validated via
++_aaos_common.validate_obj(..., "agent-registry") BEFORE any file is
++copied; a malformed registry must never reach the seam (exit 1, nothing
++published).
++
++Every required source file's existence is checked BEFORE any file is
++copied, so a single missing file (e.g. docs/COWORK-BOOTSTRAP.md, which may
++not exist yet if this script runs ahead of the sibling task that writes
++it -- a normal, expected precondition, not a bug) aborts with a usage
++error and publishes nothing -- never a partial mirror. Re-running once the
++file exists just works: no special-casing needed beyond "the file exists
++now".
++
++PUBLISHED.json is written LAST, strictly after every other file has been
++copied successfully, so its mere presence in contracts/ is itself the
++"publish succeeded" signal a reader (Probe S / Probe G in
++docs/PHASE4-DESIGN.md section 1.2) can trust.
++
++Testing note: this script's source tree is always the module-level
++REPO_ROOT below (a deliberate design decision -- there is no --repo-root
++CLI flag; this script publishes THIS repo, not an arbitrary tree). Tests
++that need to exercise the script against a fake/incomplete source tree do
++so by monkeypatching this module's REPO_ROOT attribute
++(module.REPO_ROOT = <fake tree>) before calling main(argv) -- every path
++below is computed by reading the REPO_ROOT global at call time, never
++captured once at import time, so this works. See
++tests/test_publish_contracts.py's _FakeRepoTestBase.
++
++Exit codes:
++    0   success
++    1   validation failure (agent-registry.json is malformed JSON or fails
++        agent-registry.schema.json)
++    2   usage error (git unavailable/failed and no --source-commit
++        override given; a required source file is missing; --seam-root is
++        unusable)
++"""
++from __future__ import annotations
++
++import argparse
++import json
++import subprocess
++import sys
++from datetime import datetime
++from pathlib import Path
++
++import _aaos_common as aaos
++
++REPO_ROOT = aaos.REPO_ROOT  # tests monkeypatch this attribute; see module docstring
++
++REQUIRED_SCHEMA_FILES = [
++    "agent-registry.schema.json",
++    "event.schema.json",
++    "handoff.schema.json",
++    "heartbeat.schema.json",
++    "task.schema.json",
++]
++
++REQUIRED_DOC_FILES = [
++    "AAOS-SPEC.md",
++    "COWORK-BOOTSTRAP.md",
++]
++
++
++def build_arg_parser() -> argparse.ArgumentParser:
++    parser = argparse.ArgumentParser(
++        prog="publish-contracts.py",
++        description="Publish the AAOS contracts (schemas, spec, registry, "
++        "templates) from the git tree to the seam's contracts/ mirror.",
++    )
++    parser.add_argument(
++        "--seam-root", default=None,
++        help="Seam root override (default: AAOS_SEAM_ROOT env or "
++        "_aaos_common.DEFAULT_SEAM_ROOT).",
++    )
++    parser.add_argument(
++        "--source-commit", default=None,
++        help="Use this commit sha verbatim instead of deriving it via git "
++        "(no git call is made; 'dirty' is stamped false).",
++    )
++    return parser
++
++
++def _derive_source_commit(source_commit_arg: str | None, repo_root: Path) -> tuple[str, bool]:
++    """Returns (stamped_source_commit, dirty). Raises aaos.UsageError if
++    derivation is required (no override given) and fails at any step."""
++    if source_commit_arg:
++        return source_commit_arg, False
++
++    try:
++        rev = subprocess.run(
++            ["git", "rev-parse", "HEAD"],
++            cwd=str(repo_root), capture_output=True, text=True,
++        )
++    except OSError as exc:
++        raise aaos.UsageError(
++            f"git is unavailable ({exc}) and no --source-commit override was given"
++        ) from exc
++
++    if rev.returncode != 0:
++        raise aaos.UsageError(
++            "git rev-parse HEAD failed (source tree unreadable or not a git "
++            f"repo?) and no --source-commit override was given: {rev.stderr.strip()}"
++        )
++    sha = rev.stdout.strip()
++    if not sha:
++        raise aaos.UsageError(
++            "git rev-parse HEAD returned empty output and no --source-commit "
++            "override was given"
++        )
++
++    status = subprocess.run(
++        ["git", "status", "--porcelain"],
++        cwd=str(repo_root), capture_output=True, text=True,
++    )
++    if status.returncode != 0:
++        raise aaos.UsageError(
++            "git status --porcelain failed and no --source-commit override "
++            f"was given: {status.stderr.strip()}"
++        )
++    dirty = bool(status.stdout.strip())
++    stamped = f"{sha}-dirty" if dirty else sha
++    return stamped, dirty
++
++
++def _load_and_validate_registry(registry_src: Path) -> dict:
++    """Load agent-registry.json's JSON content ourselves (not just a bare
++    existence/parse check) and validate it against agent-registry.schema.json.
++
++    Raises aaos.UsageError if the file is missing/unreadable (a
++    missing-required-source-file usage error, exit 2 -- same class as any
++    other absent required file). Raises aaos.CorruptStateError if it's
++    unparseable JSON or fails schema validation (a validation failure,
++    exit 1 -- distinct from a missing file)."""
++    if not registry_src.exists():
++        raise aaos.UsageError(f"missing required source file: {registry_src}")
++    try:
++        raw = registry_src.read_text(encoding="utf-8")
++    except OSError as exc:
++        raise aaos.UsageError(f"could not read {registry_src}: {exc}") from exc
++    try:
++        registry_obj = json.loads(raw)
++    except json.JSONDecodeError as exc:
++        raise aaos.CorruptStateError(f"{registry_src} is not valid JSON: {exc}") from exc
++
++    errors = aaos.validate_obj(registry_obj, "agent-registry")
++    if errors:
++        raise aaos.CorruptStateError(
++            f"{registry_src} failed agent-registry schema validation: {errors}"
++        )
++    return registry_obj
++
++
++def _build_copy_plan(repo_root: Path, contracts_dir: Path) -> list[tuple[Path, Path]]:
++    """Returns [(src, dest), ...] for every non-PUBLISHED.json file this
++    script copies. Does not check existence -- callers verify every src
++    exists before copying anything (fail closed, publish nothing)."""
++    schema_dir = repo_root / "schemas"
++    docs_dir = repo_root / "docs"
++    templates_dir = repo_root / "templates"
++
++    plan: list[tuple[Path, Path]] = []
++    for name in REQUIRED_SCHEMA_FILES:
++        plan.append((schema_dir / name, contracts_dir / "schemas" / name))
++
++    plan.append((repo_root / "agent-registry.json", contracts_dir / "agent-registry.json"))
++
++    for name in REQUIRED_DOC_FILES:
++        plan.append((docs_dir / name, contracts_dir / name))
++
++    if templates_dir.is_dir():
++        for tf in sorted(p for p in templates_dir.iterdir() if p.is_file()):
++            plan.append((tf, contracts_dir / "templates" / tf.name))
++    else:
++        # templates/ itself missing is a missing-required-source-file
++        # condition; folding it into `plan` lets the single existence-check
++        # pass below catch it uniformly with everything else.
++        plan.append((templates_dir, contracts_dir / "templates"))
++
++    return plan
++
++
++def main(argv=None) -> int:
++    args = build_arg_parser().parse_args(argv)
++    repo_root = REPO_ROOT  # re-read the module global at call time (tests monkeypatch it)
++
++    try:
++        seam_root = aaos.seam_root(args.seam_root)
++    except Exception as exc:
++        print(f"USAGE ERROR: bad --seam-root: {exc}", file=sys.stderr)
++        return 2
++
++    if seam_root.exists() and not seam_root.is_dir():
++        print(
++            f"USAGE ERROR: bad --seam-root: {seam_root} exists and is not a directory",
++            file=sys.stderr,
++        )
++        return 2
++
++    contracts_dir = seam_root / "contracts"
++
++    try:
++        source_commit, dirty = _derive_source_commit(args.source_commit, repo_root)
++    except aaos.UsageError as exc:
++        print(f"USAGE ERROR: {exc}", file=sys.stderr)
++        return 2
++
++    try:
++        _load_and_validate_registry(repo_root / "agent-registry.json")
++    except aaos.UsageError as exc:
++        print(f"USAGE ERROR: {exc}", file=sys.stderr)
++        return 2
++    except aaos.CorruptStateError as exc:
++        print(f"VALIDATION FAILED: {exc}", file=sys.stderr)
++        return 1
++
++    plan = _build_copy_plan(repo_root, contracts_dir)
++
++    missing = [src for src, _dest in plan if not src.exists()]
++    if missing:
++        for src in missing:
++            print(f"USAGE ERROR: missing required source file: {src}", file=sys.stderr)
++        return 2
++
++    for src, dest in plan:
++        aaos.atomic_write(dest, src.read_bytes())
++
++    published = {
++        "protocol_version": "1.0",
++        "source_commit": source_commit,
++        "generated_at": datetime.now().astimezone().isoformat(),
++        "dirty": dirty,
++    }
++    aaos.atomic_write(
++        contracts_dir / "PUBLISHED.json",
++        json.dumps(published, indent=2, ensure_ascii=False) + "\n",
++    )
++
++    print(
++        f"PUBLISHED: {contracts_dir} ({len(plan)} file(s) + PUBLISHED.json; "
++        f"source_commit={source_commit}, dirty={dirty})"
++    )
++    return 0
++
++
++if __name__ == "__main__":
++    sys.exit(main())

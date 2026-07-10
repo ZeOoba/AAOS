@@ -83,7 +83,7 @@ The general "never delete" rule applied to a task. Appropriate when a task is `d
    (Create `tasks\_archive\` if it doesn't exist yet — same rule as everywhere else: create directories before writing into them, never delete.)
 3. **Move any related files with it, if they still exist:**
    - Any lock file at `locks\<task-id>.lock` still present → `locks\_archive\<task-id>.<timestamp>.lock` (per §2's move procedure — a `done`/`failed` task should normally have no live lock left, but check).
-   - Any handoff(s) at `handoffs\<handoff-id>.json` that reference this `task-id` → `handoffs\_archive\<handoff-id>.json`. Handoffs are write-once, so this is a pure relocation, not an edit.
+   - Any handoff(s) at `handoffs\<handoff-id>.json` that reference this `task-id` → `handoffs\_archive\<handoff-id>.json` (create `handoffs\_archive\` if it doesn't exist yet — same rule as `tasks\_archive\` in step 2). Handoffs are write-once, so this is a pure relocation, not an edit.
 4. **Leave the event log alone.** Do not touch `events\aaos-events.ndjson`. Every event this task ever generated (`TaskLeased`, `LeaseRenewed`, `TaskCompleted`, etc.) stays exactly where it is, in place, forever — archiving a task removes it from the *live directories* only, never from history. If you ever need this task's full story after archiving it, it's `grep`-able out of `aaos-events.ndjson` by `task_ref`, not out of `tasks\_archive\`.
 5. **Validate:** run `tools/validate.py` against the moved task file at its new `_archive` path to confirm it's still schema-valid after the edit.
 

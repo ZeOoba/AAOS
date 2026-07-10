@@ -221,6 +221,58 @@ class HappyPathTests(_FakeRepoTestBase):
         )
 
 
+class MidCopyFaultTests(_FakeRepoTestBase):
+    """Phase 4 adversarial-review Finding 3 (Minor): a re-publish over an
+    existing (stale) contracts/ that fails partway through the copy loop
+    must NOT leave the stale PUBLISHED.json in place still signaling
+    success -- Probe S (docs/COWORK-BOOTSTRAP.md) trusts PUBLISHED.json's
+    mere presence unconditionally, so a stale-but-present stamp over a
+    Frankenstein (mixed old/new) mirror would be silently trusted."""
+
+    def test_mid_copy_failure_invalidates_stale_published_json(self):
+        # First, a real successful publish -- establishes a "stale prior"
+        # PUBLISHED.json plus stale prior file contents to detect leftover
+        # staleness against, exactly like a real re-publish scenario.
+        code, out = self.run_tool(
+            "--seam-root", str(self.seam_root), "--source-commit", "STALE_PRIOR_COMMIT"
+        )
+        self.assertEqual(code, 0, out)
+        prior_published = json.loads((self.contracts_dir / "PUBLISHED.json").read_text(encoding="utf-8"))
+        self.assertEqual(prior_published["source_commit"], "STALE_PRIOR_COMMIT")
+
+        # Now change a source file (so a successful re-publish WOULD differ
+        # from what's on the seam) and inject a failure partway through the
+        # copy loop by making atomic_write raise on its 3rd call.
+        (self.fake_repo / "agent-registry.json").write_text(
+            (self.fake_repo / "agent-registry.json").read_text(encoding="utf-8"), encoding="utf-8"
+        )
+        original_atomic_write = self.module.aaos.atomic_write
+        call_count = {"n": 0}
+
+        def flaky_atomic_write(path, content):
+            call_count["n"] += 1
+            if call_count["n"] == 3:
+                raise PermissionError("simulated mid-copy fault (Finding 3 regression test)")
+            return original_atomic_write(path, content)
+
+        self.module.aaos.atomic_write = flaky_atomic_write
+        try:
+            with self.assertRaises(PermissionError):
+                self.run_tool("--seam-root", str(self.seam_root), "--source-commit", "FRESH_COMMIT")
+        finally:
+            self.module.aaos.atomic_write = original_atomic_write
+
+        # The fix under test: PUBLISHED.json must be gone, not stale-but-
+        # present. A gone PUBLISHED.json is what makes Probe S correctly
+        # fail closed (docs/COWORK-BOOTSTRAP.md §2/§3) instead of trusting a
+        # mixed old/new mirror.
+        self.assertFalse(
+            (self.contracts_dir / "PUBLISHED.json").exists(),
+            "PUBLISHED.json survived a mid-copy crash -- it would still tell "
+            "Probe S the (possibly Frankenstein) mirror is trustworthy",
+        )
+
+
 class MissingSourceFileTests(_FakeRepoTestBase):
     include_bootstrap = False  # simulate this task running before the sibling task writes COWORK-BOOTSTRAP.md
 
