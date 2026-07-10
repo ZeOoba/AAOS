@@ -1,0 +1,50 @@
+
+--- Step 1: Probe S -- seam reachability (read contracts/PUBLISHED.json) ---
+  PASS: C:\Users\Owner\OneDrive - Oxford Capital Partners\Claude_Workspace\AAOS\contracts\PUBLISHED.json exists, parses, protocol_version=1.0 (source_commit=065e09efb22876afc8428b79e15fd2c996a75378, dirty=False)
+
+--- Step 2: Probe G -- contracts source (read schemas/task.schema.json from git tree) ---
+  PASS: C:\Users\Owner\AAOS\schemas\task.schema.json readable -> CONTRACTS_SOURCE=git-tree
+  CONTRACTS_SOURCE = git-tree
+
+--- Step 3: Probe X -- execution (validate.py against contracts/agent-registry.json) ---
+  PASS: exit 0 -> MODE=FULL-EXEC. stdout: VALID: C:\Users\Owner\OneDrive - Oxford Capital Partners\Claude_Workspace\AAOS\contracts\agent-registry.json
+  MODE = FULL-EXEC
+
+--- Step 4: Read contracts (AAOS-SPEC.md, handoff/event schemas, agent-registry.json) ---
+  PASS: C:\Users\Owner\AAOS\docs\AAOS-SPEC.md readable and parses (17425 bytes)
+  PASS: C:\Users\Owner\AAOS\schemas\handoff.schema.json readable and parses (3430 bytes)
+  PASS: C:\Users\Owner\AAOS\schemas\event.schema.json readable and parses (2975 bytes)
+  PASS: C:\Users\Owner\AAOS\agent-registry.json readable and parses (1868 bytes)
+  PASS: cowork write_scope present: ['C:/Users/Owner/OneDrive - Oxford Capital Partners/Claude_Workspace/**', 'notion://**']
+
+--- Step 5: Read the queue -- confirm t-cowork-seam-confirm.json present, queued, owner=cowork ---
+  PASS: C:\Users\Owner\OneDrive - Oxford Capital Partners\Claude_Workspace\AAOS\projects\ora-ops\tasks\t-cowork-seam-confirm.json: state=queued, owner_agent=cowork, acceptance_criteria=3 items
+
+--- Step 6: Read the handoff -- confirm to_agent/task_ref correct, verify artifact hash on disk ---
+  PASS: C:\Users\Owner\OneDrive - Oxford Capital Partners\Claude_Workspace\AAOS\projects\ora-ops\handoffs\h-code-to-cowork-seam-confirm.json: to_agent=cowork, task_ref=t-cowork-seam-confirm
+  PASS: artifact C:/Users/Owner/OneDrive - Oxford Capital Partners/Claude_Workspace/AAOS/_seam-probe.md: sha256 and bytes match manifest (2167 bytes)
+
+--- Step 7: Read the artifact input (_seam-probe.md) ---
+  PASS: C:\Users\Owner\OneDrive - Oxford Capital Partners\Claude_Workspace\AAOS\_seam-probe.md readable (2154 bytes)
+
+--- Step 8: Draft return handoff in memory; self-check against schema; assert handoffs/ writable ---
+  PASS: draft handoff has exactly the required fields (no extra, none missing)
+  PASS: C:\Users\Owner\OneDrive - Oxford Capital Partners\Claude_Workspace\AAOS\projects\ora-ops\handoffs confirmed writable (create+delete sentinel)
+
+--- Step 9: Draft HandoffPosted event in memory; self-check against schema; assert pending/ writable ---
+  PASS: draft event has all required fields, type is a valid enum value
+  PASS: event_id 'e-2026-07-10T11:59:52.762903-04:00-1' matches pattern ^e-[0-9TZ:.+-]+-[0-9]+$
+  PASS: C:\Users\Owner\OneDrive - Oxford Capital Partners\Claude_Workspace\AAOS\projects\ora-ops\events\aaos-events.ndjson.pending confirmed writable (create+delete sentinel)
+
+--- Step 10: write_scope check -- draft only touches Claude_Workspace/**, no out-of-scope artifact ---
+  PASS: draft write target under Claude_Workspace: True; artifact_manifest empty: True
+
+--- Step 11: Fail-closed rehearsal -- point at a missing/malformed PUBLISHED.json, confirm stop path ---
+  PASS: reading C:\Users\Owner\OneDrive - Oxford Capital Partners\Claude_Workspace\AAOS\contracts\PUBLISHED-DOES-NOT-EXIST.json raises FileNotFoundError -> correctly triggers Sec3 'not-found' stop-and-report path
+  PASS: reading a malformed file raises JSONDecodeError -> correctly triggers Sec3 'malformed' stop-and-report path
+  PASS: restored: no fake/malformed files left behind
+
+--- Step 12: Cleanliness assertion -- no live artifacts created, task still queued ---
+  PASS: no ack handoff written (real or dryrun); pending/ contains 1 pre-existing file(s) (Gate-3 demo residue, none from this rehearsal); t-cowork-seam-confirm.json still state=queued
+
+=== DRY-RUN REHEARSAL: ALL 12 STEPS PASSED ===
