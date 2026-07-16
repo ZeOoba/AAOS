@@ -1,0 +1,6 @@
+# Normalize line endings repo-wide: git stores LF; Windows working tree gets CRLF via core.autocrlf.
+# Added 2026-07-16 (cross-repo audit) — matches website-canonical/oxford-command-center/ora-pm's
+# 2026-07-12 fix; this repo had core.autocrlf=true but no .gitattributes at all. No active
+# execution risk found (every tools/*.py script here is invoked with an explicit `python` prefix,
+# never via bare shebang execution) — this closes the hygiene gap and phantom-modified-diff risk.
+* text=auto
