@@ -1,12 +1,12 @@
 #!/usr/bin/env python3
 """
 tools/project-notion.py — AAOS Phase 3 §4.2: build the local Derived
-projection payload later posted (by a future agent-session call site) to
-the Notion Ops Hub.
+projection payload posted to the Notion Ops Hub by tools/publish-notion.py
+(the call site Phase 3 §4.2/§6 deferred, now built).
 
 This is a pure local-file compute script. It touches Notion not at all —
-per docs/PHASE3-DESIGN.md §4.2 and §6, the actual Ops Hub page create/
-update is out of Phase-3 scope. This script reads ONLY local seam files:
+that's tools/publish-notion.py's job, kept separate so this script stays
+testable without any network/token dependency. This script reads ONLY local seam files:
 every tasks/<id>.json in the project, the NDJSON event log (latest event
 per task, matched on refs.task), and heartbeat.json (absent -> every task's
 heartbeat_status is "unknown").
