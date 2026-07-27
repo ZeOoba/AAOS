@@ -52,7 +52,7 @@ This checks the file against its schema (`C:\Users\Owner\AAOS\schemas\*.schema.j
 
 ## 2. Break a stuck lock
 
-Use this when a lock looks stuck — past its `expires` time, holder unresponsive — but the automated `expire-leases` sweep (a Phase 3 tool; not built yet as of this writing) hasn't run, or you don't trust it to run in time. This manual procedure is exactly what that sweep will eventually automate; until it exists, or when you need to intervene ahead of its normal cadence, do it by hand.
+Use this when a lock looks stuck — past its `expires` time, holder unresponsive — but the automated `expire-leases` sweep (built, and scheduled on the CC/MCP fleet as `ora-aaos-expire-leases` since 2026-07-10, 3×/day at 07:12/13:12/19:12 ET — `list_scheduled_tasks` is the source of truth, not this doc) hasn't run yet, or you don't trust it to run in time. This manual procedure is what that sweep automates on its own cadence; use it to intervene ahead of that cadence, or if the scheduled sweep itself looks stuck.
 
 1. **Locate the lock.** `locks\<task-id>.lock` (JSON: `protocol_version`, `task_ref`, `holder`, `acquired`, `expires`, `session`).
 2. **Confirm it's genuinely expired**, not just old-looking:
