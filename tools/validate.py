@@ -66,6 +66,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import re
 import sys
 from pathlib import Path
 
@@ -245,6 +246,129 @@ def check_write_scope(handoff: dict, registry, registry_path: Path) -> list[str]
     return errors
 
 
+# register-scheduled-task skill (v2.13, the live install under
+# local-agent-mode-sessions/skills-plugin/.../skills/register-scheduled-task)
+# makes list_scheduled_tasks a MANDATORY verification step ("no 'done' without
+# evidence ... paste the returned entry") -- it is never itself prohibited.
+# What is actually prohibited is using it (or its output) AS the registration
+# mechanism: registration is create_scheduled_task/update_scheduled_task-only,
+# never a hand-written/JSON-splice write.
+#
+# POSITIVE-EVIDENCE design (independent review round 2, 2026-08-22, "doctrine
+# check too narrow"): an earlier version flagged any occurrence of the needle
+# with no "verification word" nearby. That is too broad in the other
+# direction -- register-scheduled-task's own SKILL.md legitimately mentions
+# list_scheduled_tasks with NO verification word anywhere nearby (e.g. its
+# surface note on which sessions carry the MCP tools, or the PATH-
+# DISAMBIGUATOR note on picking the right fleet's entry) -- a handoff that
+# accurately quotes or relays that doctrine text would have been wrongly
+# rejected. Requiring actual splice/hand-write language as positive evidence
+# of the PROHIBITED mechanism -- the doctrine's own term of art, per
+# CLAUDE.md ("never JSON-splice") and this skill ("JSON-splice registration
+# is PROHIBITED") -- closes that gap: only flag when the text describes
+# doing the forbidden thing, not merely mentioning the tool.
+#
+# Word-boundary matched, NOT substring (independent review round 1, M2): a
+# bare substring test on a verify-word list let "checklist"/"confirmation"
+# falsely suppress a real finding -- moot now that suppression is gone, but
+# the same discipline applies to this positive-evidence regex too (so a
+# word like "splicer" as a name wouldn't spuriously anchor on "splice").
+_SPLICE_ACTION_RE = re.compile(
+    r"\bsplic(?:e|es|ed|ing)\b|\bhand[- ]?(?:writ(?:e|es|ten|ing)|edit(?:s|ed|ing)?)\b",
+    re.IGNORECASE,
+)
+# Chars scanned on each side of a needle occurrence (independent review round
+# 1, M1): an earlier sentence-splitting implementation let a signal word
+# anywhere in an unbounded comma-joined run-on (or a field with no terminal
+# punctuation at all) apply to the whole field. A fixed window bounds how
+# far the splice-action language may sit from the actual mention and still
+# count as describing THAT mention's mechanism.
+_REGISTRATION_DOCTRINE_WINDOW = 80
+
+
+def _registration_doctrine_flagged_excerpts(value: str, needle: str) -> list[str]:
+    """Excerpts (needle +/- _REGISTRATION_DOCTRINE_WINDOW chars) around each
+    occurrence of `needle` in `value` that ALSO carries splice/hand-write
+    language in that same window -- positive evidence that list_scheduled_
+    tasks is being described as the write mechanism, not merely mentioned.
+
+    Case-insensitive on both the needle and the action regex (independent
+    review round 2, "case-sensitive needle bypass": the original used
+    value.find(), which would miss 'List_scheduled_tasks'/
+    'LIST_SCHEDULED_TASKS'). Excerpts are still sliced from the ORIGINAL
+    (not lowercased) text so error messages preserve real casing. Pure."""
+    out = []
+    low = value.lower()
+    needle_low = needle.lower()
+    start = 0
+    while True:
+        idx = low.find(needle_low, start)
+        if idx == -1:
+            break
+        lo = max(0, idx - _REGISTRATION_DOCTRINE_WINDOW)
+        hi = min(len(value), idx + len(needle) + _REGISTRATION_DOCTRINE_WINDOW)
+        window = value[lo:hi]
+        if _SPLICE_ACTION_RE.search(window):
+            out.append(window.strip())
+        start = idx + len(needle_low)
+    return out
+
+
+def check_registration_doctrine(handoff: dict) -> list[str]:
+    """Return REGISTRATION-DOCTRINE VIOLATION error strings (empty if none)
+    for a handoff-shaped instance whose free-text fields describe using
+    'list_scheduled_tasks' AS the registration/write mechanism (splice/
+    hand-write language nearby -- see _registration_doctrine_flagged_
+    excerpts), not merely mentioning the tool.
+
+    WHY (2026-08-22): scheduled-task registration doctrine (register-
+    scheduled-task skill) is create_scheduled_task-only -- never a
+    list_scheduled_tasks-driven JSON-splice. That rule was prose-only, so a
+    handoff brief could carry the violation forward to its receiving agent
+    with nothing to catch it. Checked fields: context_summary,
+    required_next_action, blockers -- the free-text fields a handoff author
+    would actually write instructions into. A path inside artifact_manifest
+    is not checked; a real file path containing that substring is not the
+    failure mode this guards against.
+
+    NOT flagged: a bare mention of list_scheduled_tasks with no splice/
+    hand-write language nearby (e.g. "verified via list_scheduled_tasks",
+    or doctrine-quoting prose like "list_scheduled_tasks is unavailable in
+    a cloud-sandbox session") -- neither describes doing the prohibited
+    thing. One error per offending occurrence, not per field/entry -- a
+    field with two bad mentions must not read as a single finding."""
+    errors: list[str] = []
+    needle = "list_scheduled_tasks"
+
+    for field in ("context_summary", "required_next_action"):
+        value = handoff.get(field)
+        if isinstance(value, str):
+            for excerpt in _registration_doctrine_flagged_excerpts(value, needle):
+                errors.append(
+                    f"REGISTRATION-DOCTRINE VIOLATION: '{field}' references "
+                    f"'{needle}' as a splice/hand-write mechanism ({excerpt!r}) "
+                    "-- registration/tooling flows are create_scheduled_task-"
+                    "only, never a list_scheduled_tasks-driven JSON-splice "
+                    "(register-scheduled-task skill doctrine)."
+                )
+
+    blockers = handoff.get("blockers")
+    if isinstance(blockers, list):
+        for b in blockers:
+            if not isinstance(b, str):
+                continue
+            for excerpt in _registration_doctrine_flagged_excerpts(b, needle):
+                errors.append(
+                    f"REGISTRATION-DOCTRINE VIOLATION: 'blockers' entry "
+                    f"references '{needle}' as a splice/hand-write mechanism "
+                    f"({excerpt!r}) -- registration/tooling flows are "
+                    "create_scheduled_task-only, never a list_scheduled_tasks-"
+                    "driven JSON-splice (register-scheduled-task skill doctrine)."
+                )
+
+    return errors
+
+
 def validate_instance(
     instance, validator: Draft202012Validator, schema_name: str, registry, registry_path: Path
 ) -> list[str]:
@@ -276,6 +400,7 @@ def validate_instance(
 
     if schema_name == "handoff":
         errors.extend(check_write_scope(instance, registry, registry_path))
+        errors.extend(check_registration_doctrine(instance))
 
     return errors
 

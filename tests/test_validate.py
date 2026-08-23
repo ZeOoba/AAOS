@@ -96,6 +96,152 @@ class HandoffValidationTests(unittest.TestCase):
         self.assertIn("WRITE-SCOPE VIOLATION", out)
         self.assertIn("ghost-agent", out)
 
+    def test_handoff_referencing_list_scheduled_tasks_is_rejected(self):
+        """2026-08-22: registration/tooling flows are create_scheduled_task-only
+        (register-scheduled-task skill doctrine) -- a handoff whose free-text
+        fields describe USING list_scheduled_tasks as the registration
+        mechanism (no verification-context word alongside it) must fail, not
+        just print a WARN, so the violation can never ride along to the
+        receiving agent."""
+        target = FIXTURES_DIR / "h-invalid-registration-doctrine.json"
+        code, out = run_validate(
+            str(target),
+            "--schema-dir", str(SCHEMA_DIR),
+            "--registry", str(FIXTURE_REGISTRY),
+        )
+        self.assertNotEqual(code, 0)
+        self.assertIn("REGISTRATION-DOCTRINE VIOLATION", out)
+        self.assertIn("list_scheduled_tasks", out)
+
+    def test_handoff_not_referencing_list_scheduled_tasks_is_unaffected(self):
+        """Control case: the existing valid fixture has none of the offending
+        text and must still pass cleanly (no false positive)."""
+        target = FIXTURES_DIR / "h-valid-001.json"
+        code, out = run_validate(
+            str(target),
+            "--schema-dir", str(SCHEMA_DIR),
+            "--registry", str(FIXTURE_REGISTRY),
+        )
+        self.assertEqual(code, 0, out)
+        self.assertNotIn("REGISTRATION-DOCTRINE VIOLATION", out)
+
+    def test_handoff_verifying_via_list_scheduled_tasks_is_not_flagged(self):
+        """register-scheduled-task skill v2.13 makes list_scheduled_tasks a
+        MANDATORY verification step ("no 'done' without evidence ... paste
+        the returned entry") -- it is never itself prohibited. Only using it
+        as the registration mechanism is. A handoff that says it verified via
+        list_scheduled_tasks (the doctrine-compliant, expected phrasing) must
+        pass cleanly -- a blanket 'flag every mention' check would
+        false-positive on exactly this correct usage."""
+        target = FIXTURES_DIR / "h-valid-with-verified-list-scheduled-tasks.json"
+        code, out = run_validate(
+            str(target),
+            "--schema-dir", str(SCHEMA_DIR),
+            "--registry", str(FIXTURE_REGISTRY),
+        )
+        self.assertEqual(code, 0, out)
+        self.assertNotIn("REGISTRATION-DOCTRINE VIOLATION", out)
+
+
+class RegistrationDoctrineAdversarialTests(unittest.TestCase):
+    """Direct unit tests against check_registration_doctrine(). Round 1
+    (2026-08-22) fixed an independent review's M1 (unbounded sentence-
+    splitting) and M2 (substring matching) findings on a "flag unless a
+    verify word is nearby" design. Round 2 (same day, a second independent
+    review via qodo on the opened PR) found that design was ALSO too broad
+    in the other direction -- register-scheduled-task's own doctrine text
+    legitimately mentions list_scheduled_tasks with no verify word nearby --
+    and separately found the needle search itself was case-sensitive. Both
+    are fixed by switching to a positive-evidence design: flag only when
+    splice/hand-write language is nearby, case-insensitively."""
+
+    def _handoff(self, **overrides):
+        base = {
+            "protocol_version": "1.0", "id": "h-adv-001", "project_id": "ora-ops",
+            "task_ref": "t-adv-001", "from_agent": "claude-code", "to_agent": "cowork",
+            "artifact_manifest": [], "context_summary": "", "required_next_action": "",
+            "blockers": [], "posted_at": "2026-08-22T00:00:00-04:00",
+        }
+        base.update(overrides)
+        return base
+
+    def test_splice_language_outside_the_window_does_not_flag(self):
+        """The window bound still applies to the positive-evidence regex:
+        splice language further from the needle than
+        _REGISTRATION_DOCTRINE_WINDOW chars must not anchor to it."""
+        pad = "x" * (validate._REGISTRATION_DOCTRINE_WINDOW + 20)
+        h = self._handoff(context_summary=(
+            f"Spliced an unrelated config file earlier. {pad} "
+            "Separately, list_scheduled_tasks confirmed the entry is live."
+        ))
+        errors = validate.check_registration_doctrine(h)
+        self.assertEqual(errors, [], "splice language outside the window "
+                                     "wrongly anchored to a distant mention")
+
+    def test_splice_language_inside_the_window_flags(self):
+        h = self._handoff(context_summary=(
+            "Spliced the list_scheduled_tasks output directly into the registry."
+        ))
+        errors = validate.check_registration_doctrine(h)
+        self.assertTrue(errors)
+
+    def test_case_insensitive_needle_bypass_is_closed(self):
+        """qodo finding (PR #3, round 2): _registration_doctrine_flagged_
+        excerpts() originally used a case-sensitive str.find(), so
+        'List_scheduled_tasks'/'LIST_SCHEDULED_TASKS' evaded the check
+        entirely regardless of surrounding language."""
+        for variant in ("List_scheduled_tasks", "LIST_SCHEDULED_TASKS",
+                        "List_Scheduled_Tasks"):
+            h = self._handoff(context_summary=(
+                f"Splice the entry from {variant} output directly into the registry."
+            ))
+            errors = validate.check_registration_doctrine(h)
+            self.assertTrue(errors, f"case variant {variant!r} bypassed the check")
+
+    def test_doctrine_quoting_prose_without_splice_language_is_not_flagged(self):
+        """qodo finding (PR #3, round 2): register-scheduled-task's own
+        SKILL.md legitimately mentions list_scheduled_tasks with no
+        verification word AND no splice language nearby -- e.g. its surface
+        note on which sessions carry the MCP tools. A handoff that quotes
+        or relays that doctrine text must not be rejected."""
+        h = self._handoff(context_summary=(
+            "Per doctrine: create_scheduled_task/update_scheduled_task/"
+            "delete_scheduled_task/list_scheduled_tasks exist only in a "
+            "session running natively on-device; a cloud-sandbox Cowork "
+            "session never carries them."
+        ))
+        errors = validate.check_registration_doctrine(h)
+        self.assertEqual(errors, [])
+
+    def test_genuine_nearby_verify_word_still_passes(self):
+        """Control: the doctrine-mandated 'verified via list_scheduled_tasks'
+        phrasing (no splice language) must pass cleanly."""
+        h = self._handoff(required_next_action=(
+            "Verified via list_scheduled_tasks that the entry is live."
+        ))
+        errors = validate.check_registration_doctrine(h)
+        self.assertEqual(errors, [])
+
+    def test_two_bad_mentions_in_one_field_report_separately(self):
+        """L2 alignment: multiple offending occurrences in one field must
+        each produce their own finding, not collapse into one."""
+        h = self._handoff(context_summary=(
+            "Spliced via list_scheduled_tasks for the CC fleet. "
+            + ("padding " * 30) +
+            "Also spliced via list_scheduled_tasks for the LAMS fleet."
+        ))
+        errors = validate.check_registration_doctrine(h)
+        self.assertEqual(len(errors), 2, errors)
+
+    def test_blockers_entries_checked_with_same_window_logic(self):
+        h = self._handoff(blockers=[
+            "Splice list_scheduled_tasks output into the registry directly.",
+            "Verified via list_scheduled_tasks that the fleet is clean.",
+        ])
+        errors = validate.check_registration_doctrine(h)
+        self.assertEqual(len(errors), 1, errors)
+        self.assertIn("'blockers'", errors[0])
+
 
 class WriteScopeTraversalTests(unittest.TestCase):
     """Finding 1: match_write_scope must canonicalize .. / . segments before
