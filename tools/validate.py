@@ -66,6 +66,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import re
 import sys
 from pathlib import Path
 
@@ -245,6 +246,107 @@ def check_write_scope(handoff: dict, registry, registry_path: Path) -> list[str]
     return errors
 
 
+# register-scheduled-task skill (v2.13, the live install under
+# local-agent-mode-sessions/skills-plugin/.../skills/register-scheduled-task)
+# makes list_scheduled_tasks a MANDATORY verification step ("no 'done' without
+# evidence ... paste the returned entry") -- it is never itself prohibited.
+# What is actually prohibited is using it (or its output) AS the registration
+# mechanism: registration is create_scheduled_task/update_scheduled_task-only,
+# never a hand-written/JSON-splice write. A blanket "flag every mention"
+# check would false-positive on the correct, expected phrasing ("verified via
+# list_scheduled_tasks") that this very doctrine mandates -- so an occurrence
+# of the needle is only flagged when no verification-context word appears
+# within a bounded character window around it.
+#
+# Word-boundary matched, NOT substring (independent review 2026-08-22, M2):
+# a bare substring test lets "checklist"/"checkout"/"confirmation" falsely
+# suppress a real finding.
+_VERIFY_CONTEXT_RE = re.compile(
+    r"\b(?:verify|verified|verification|confirm|confirmed|check|checked|"
+    r"evidence|re-verify|reverify)\b",
+    re.IGNORECASE,
+)
+# Chars scanned on each side of a needle occurrence (independent review
+# 2026-08-22, M1): sentence-splitting on '.'/';'/newline let ANY verify word
+# anywhere in an unbounded comma-joined run-on (or a field with no terminal
+# punctuation at all) suppress every finding in the whole field -- exactly
+# the "check the inbox, then splice list_scheduled_tasks into the registry"
+# smuggle the check exists to catch. A fixed window bounds how far a verify
+# word may sit from the actual mention and still count.
+_REGISTRATION_DOCTRINE_WINDOW = 80
+
+
+def _registration_doctrine_flagged_excerpts(value: str, needle: str) -> list[str]:
+    """Excerpts (needle +/- _REGISTRATION_DOCTRINE_WINDOW chars) around each
+    occurrence of `needle` in `value` that has no verification-context word
+    in that window. Pure."""
+    out = []
+    start = 0
+    while True:
+        idx = value.find(needle, start)
+        if idx == -1:
+            break
+        lo = max(0, idx - _REGISTRATION_DOCTRINE_WINDOW)
+        hi = min(len(value), idx + len(needle) + _REGISTRATION_DOCTRINE_WINDOW)
+        window = value[lo:hi]
+        if not _VERIFY_CONTEXT_RE.search(window):
+            out.append(window.strip())
+        start = idx + len(needle)
+    return out
+
+
+def check_registration_doctrine(handoff: dict) -> list[str]:
+    """Return REGISTRATION-DOCTRINE VIOLATION error strings (empty if none)
+    for a handoff-shaped instance whose free-text fields reference
+    'list_scheduled_tasks' OUTSIDE a verification context.
+
+    WHY (2026-08-22): scheduled-task registration doctrine (register-
+    scheduled-task skill) is create_scheduled_task-only -- never a
+    list_scheduled_tasks-driven JSON-splice. That rule was prose-only, so a
+    handoff brief could carry the violation forward to its receiving agent
+    with nothing to catch it. Checked fields: context_summary,
+    required_next_action, blockers -- the free-text fields a handoff author
+    would actually write instructions into. A path inside artifact_manifest
+    is not checked; a real file path containing that substring is not the
+    failure mode this guards against.
+
+    NOT flagged: an occurrence with a verification word nearby (e.g.
+    "verified via list_scheduled_tasks", "re-check via list_scheduled_tasks
+    before acting") -- that is the skill's own mandatory evidence step, not
+    a violation. One error per offending occurrence, not per field/entry --
+    a field with two bad mentions must not read as a single finding."""
+    errors: list[str] = []
+    needle = "list_scheduled_tasks"
+
+    for field in ("context_summary", "required_next_action"):
+        value = handoff.get(field)
+        if isinstance(value, str):
+            for excerpt in _registration_doctrine_flagged_excerpts(value, needle):
+                errors.append(
+                    f"REGISTRATION-DOCTRINE VIOLATION: '{field}' references "
+                    f"'{needle}' outside a verification context ({excerpt!r}) "
+                    "-- registration/tooling flows are create_scheduled_task-"
+                    "only, never a list_scheduled_tasks-driven JSON-splice "
+                    "(register-scheduled-task skill doctrine)."
+                )
+
+    blockers = handoff.get("blockers")
+    if isinstance(blockers, list):
+        for b in blockers:
+            if not isinstance(b, str):
+                continue
+            for excerpt in _registration_doctrine_flagged_excerpts(b, needle):
+                errors.append(
+                    f"REGISTRATION-DOCTRINE VIOLATION: 'blockers' entry "
+                    f"references '{needle}' outside a verification context "
+                    f"({excerpt!r}) -- registration/tooling flows are "
+                    "create_scheduled_task-only, never a list_scheduled_tasks-"
+                    "driven JSON-splice (register-scheduled-task skill doctrine)."
+                )
+
+    return errors
+
+
 def validate_instance(
     instance, validator: Draft202012Validator, schema_name: str, registry, registry_path: Path
 ) -> list[str]:
@@ -276,6 +378,7 @@ def validate_instance(
 
     if schema_name == "handoff":
         errors.extend(check_write_scope(instance, registry, registry_path))
+        errors.extend(check_registration_doctrine(instance))
 
     return errors
 

@@ -1,0 +1,15 @@
+{
+  "protocol_version": "1.0",
+  "id": "h-sample-doctrine-003",
+  "project_id": "ora-ops",
+  "task_ref": "t-sample-001",
+  "from_agent": "claude-code",
+  "to_agent": "cowork",
+  "artifact_manifest": [
+    { "path": "C:/Users/Owner/AAOS/agent-registry.json", "sha256": "9143d84b702fa5c1787795bc22a48039a9ed9c765fdcd0a7d7393603ca16b15", "bytes": 1868 }
+  ],
+  "context_summary": "Registered the new fleet task via create_scheduled_task and verified via list_scheduled_tasks that the entry is live.",
+  "required_next_action": "Re-verify via list_scheduled_tasks before your next fire-time check.",
+  "blockers": [],
+  "posted_at": "2026-07-09T09:15:00-04:00"
+}

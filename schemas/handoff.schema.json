@@ -2,6 +2,7 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://ora.internal/aaos/schemas/handoff.schema.json",
   "title": "AAOS Handoff",
+  "$comment": "MACHINE CHECK (2026-08-22): tools/validate.py's check_registration_doctrine() rejects a handoff whose context_summary/required_next_action/blockers reference 'list_scheduled_tasks' outside a verification context (register-scheduled-task doctrine: create_scheduled_task-only, never a list_scheduled_tasks-driven JSON-splice).\n'Verified via list_scheduled_tasks' is NOT flagged -- that tool call is itself the skill's mandatory evidence step, not a violation.",
   "type": "object",
   "additionalProperties": false,
   "required": [

@@ -96,6 +96,135 @@ class HandoffValidationTests(unittest.TestCase):
         self.assertIn("WRITE-SCOPE VIOLATION", out)
         self.assertIn("ghost-agent", out)
 
+    def test_handoff_referencing_list_scheduled_tasks_is_rejected(self):
+        """2026-08-22: registration/tooling flows are create_scheduled_task-only
+        (register-scheduled-task skill doctrine) -- a handoff whose free-text
+        fields describe USING list_scheduled_tasks as the registration
+        mechanism (no verification-context word alongside it) must fail, not
+        just print a WARN, so the violation can never ride along to the
+        receiving agent."""
+        target = FIXTURES_DIR / "h-invalid-registration-doctrine.json"
+        code, out = run_validate(
+            str(target),
+            "--schema-dir", str(SCHEMA_DIR),
+            "--registry", str(FIXTURE_REGISTRY),
+        )
+        self.assertNotEqual(code, 0)
+        self.assertIn("REGISTRATION-DOCTRINE VIOLATION", out)
+        self.assertIn("list_scheduled_tasks", out)
+
+    def test_handoff_not_referencing_list_scheduled_tasks_is_unaffected(self):
+        """Control case: the existing valid fixture has none of the offending
+        text and must still pass cleanly (no false positive)."""
+        target = FIXTURES_DIR / "h-valid-001.json"
+        code, out = run_validate(
+            str(target),
+            "--schema-dir", str(SCHEMA_DIR),
+            "--registry", str(FIXTURE_REGISTRY),
+        )
+        self.assertEqual(code, 0, out)
+        self.assertNotIn("REGISTRATION-DOCTRINE VIOLATION", out)
+
+    def test_handoff_verifying_via_list_scheduled_tasks_is_not_flagged(self):
+        """register-scheduled-task skill v2.13 makes list_scheduled_tasks a
+        MANDATORY verification step ("no 'done' without evidence ... paste
+        the returned entry") -- it is never itself prohibited. Only using it
+        as the registration mechanism is. A handoff that says it verified via
+        list_scheduled_tasks (the doctrine-compliant, expected phrasing) must
+        pass cleanly -- a blanket 'flag every mention' check would
+        false-positive on exactly this correct usage."""
+        target = FIXTURES_DIR / "h-valid-with-verified-list-scheduled-tasks.json"
+        code, out = run_validate(
+            str(target),
+            "--schema-dir", str(SCHEMA_DIR),
+            "--registry", str(FIXTURE_REGISTRY),
+        )
+        self.assertEqual(code, 0, out)
+        self.assertNotIn("REGISTRATION-DOCTRINE VIOLATION", out)
+
+
+class RegistrationDoctrineAdversarialTests(unittest.TestCase):
+    """Direct unit tests against check_registration_doctrine(), added
+    2026-08-22 per an independent review's two findings (M1, M2) on the
+    original sentence-splitting/substring-matching implementation."""
+
+    def _handoff(self, **overrides):
+        base = {
+            "protocol_version": "1.0", "id": "h-adv-001", "project_id": "ora-ops",
+            "task_ref": "t-adv-001", "from_agent": "claude-code", "to_agent": "cowork",
+            "artifact_manifest": [], "context_summary": "", "required_next_action": "",
+            "blockers": [], "posted_at": "2026-08-22T00:00:00-04:00",
+        }
+        base.update(overrides)
+        return base
+
+    def test_m1_verify_word_outside_the_context_window_does_not_suppress(self):
+        """Reviewer's M1 exploit, generalized: the old sentence-splitting
+        implementation had NO distance bound at all -- one verify word
+        anywhere in an unbounded comma-joined run-on (or a whole
+        punctuation-free field) suppressed every finding in it. The fixed
+        window (_REGISTRATION_DOCTRINE_WINDOW chars) must not be defeated by
+        placing the verify word further away than that window on either
+        side of the actual list_scheduled_tasks mention."""
+        pad = "x" * (validate._REGISTRATION_DOCTRINE_WINDOW + 20)
+        h = self._handoff(context_summary=(
+            f"First check the inbox. {pad} "
+            "Then splice the entry from list_scheduled_tasks output "
+            "straight into the registry."
+        ))
+        errors = validate.check_registration_doctrine(h)
+        self.assertTrue(errors, "M1 regression: a verify word outside the "
+                                "context window wrongly suppressed the finding")
+
+    def test_m1_verify_word_just_inside_the_window_still_suppresses(self):
+        """Sanity check on the window's own boundary: a verify word that
+        genuinely IS close to the needle (within the window) must still
+        suppress -- the fix bounds distance, it doesn't ban proximity."""
+        h = self._handoff(context_summary=(
+            "Checked and then spliced list_scheduled_tasks output into the registry."
+        ))
+        errors = validate.check_registration_doctrine(h)
+        self.assertEqual(errors, [])
+
+    def test_m2_substring_word_does_not_suppress(self):
+        """Reviewer's exact M2 exploit: 'checklist' must not satisfy the
+        verification-context allowance via bare substring match on 'check'."""
+        h = self._handoff(context_summary=(
+            "Splice the list_scheduled_tasks entry into the registry checklist."
+        ))
+        errors = validate.check_registration_doctrine(h)
+        self.assertTrue(errors, "M2 regression: 'checklist' substring-matched "
+                                 "'check' and wrongly suppressed the finding")
+
+    def test_genuine_nearby_verify_word_still_suppresses(self):
+        """Control: a real verification word close to the needle must still
+        suppress -- the M1/M2 fixes must not turn this into a blanket ban."""
+        h = self._handoff(required_next_action=(
+            "Verified via list_scheduled_tasks that the entry is live."
+        ))
+        errors = validate.check_registration_doctrine(h)
+        self.assertEqual(errors, [])
+
+    def test_two_bad_mentions_in_one_field_report_separately(self):
+        """L2 alignment: multiple offending occurrences in one field must
+        each produce their own finding, not collapse into one."""
+        h = self._handoff(context_summary=(
+            "Spliced via list_scheduled_tasks for the CC fleet. "
+            + ("padding " * 30) +
+            "Also spliced via list_scheduled_tasks for the LAMS fleet."
+        ))
+        errors = validate.check_registration_doctrine(h)
+        self.assertEqual(len(errors), 2, errors)
+
+    def test_blockers_entries_checked_with_same_window_logic(self):
+        h = self._handoff(blockers=[
+            "Splice list_scheduled_tasks output into the registry directly.",
+            "Verified via list_scheduled_tasks that the fleet is clean.",
+        ])
+        errors = validate.check_registration_doctrine(h)
+        self.assertEqual(len(errors), 1, errors)
+        self.assertIn("'blockers'", errors[0])
+
 
 class WriteScopeTraversalTests(unittest.TestCase):
     """Finding 1: match_write_scope must canonicalize .. / . segments before
