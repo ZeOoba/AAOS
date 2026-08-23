@@ -252,53 +252,74 @@ def check_write_scope(handoff: dict, registry, registry_path: Path) -> list[str]
 # evidence ... paste the returned entry") -- it is never itself prohibited.
 # What is actually prohibited is using it (or its output) AS the registration
 # mechanism: registration is create_scheduled_task/update_scheduled_task-only,
-# never a hand-written/JSON-splice write. A blanket "flag every mention"
-# check would false-positive on the correct, expected phrasing ("verified via
-# list_scheduled_tasks") that this very doctrine mandates -- so an occurrence
-# of the needle is only flagged when no verification-context word appears
-# within a bounded character window around it.
+# never a hand-written/JSON-splice write.
 #
-# Word-boundary matched, NOT substring (independent review 2026-08-22, M2):
-# a bare substring test lets "checklist"/"checkout"/"confirmation" falsely
-# suppress a real finding.
-_VERIFY_CONTEXT_RE = re.compile(
-    r"\b(?:verify|verified|verification|confirm|confirmed|check|checked|"
-    r"evidence|re-verify|reverify)\b",
+# POSITIVE-EVIDENCE design (independent review round 2, 2026-08-22, "doctrine
+# check too narrow"): an earlier version flagged any occurrence of the needle
+# with no "verification word" nearby. That is too broad in the other
+# direction -- register-scheduled-task's own SKILL.md legitimately mentions
+# list_scheduled_tasks with NO verification word anywhere nearby (e.g. its
+# surface note on which sessions carry the MCP tools, or the PATH-
+# DISAMBIGUATOR note on picking the right fleet's entry) -- a handoff that
+# accurately quotes or relays that doctrine text would have been wrongly
+# rejected. Requiring actual splice/hand-write language as positive evidence
+# of the PROHIBITED mechanism -- the doctrine's own term of art, per
+# CLAUDE.md ("never JSON-splice") and this skill ("JSON-splice registration
+# is PROHIBITED") -- closes that gap: only flag when the text describes
+# doing the forbidden thing, not merely mentioning the tool.
+#
+# Word-boundary matched, NOT substring (independent review round 1, M2): a
+# bare substring test on a verify-word list let "checklist"/"confirmation"
+# falsely suppress a real finding -- moot now that suppression is gone, but
+# the same discipline applies to this positive-evidence regex too (so a
+# word like "splicer" as a name wouldn't spuriously anchor on "splice").
+_SPLICE_ACTION_RE = re.compile(
+    r"\bsplic(?:e|es|ed|ing)\b|\bhand[- ]?(?:writ(?:e|es|ten|ing)|edit(?:s|ed|ing)?)\b",
     re.IGNORECASE,
 )
-# Chars scanned on each side of a needle occurrence (independent review
-# 2026-08-22, M1): sentence-splitting on '.'/';'/newline let ANY verify word
+# Chars scanned on each side of a needle occurrence (independent review round
+# 1, M1): an earlier sentence-splitting implementation let a signal word
 # anywhere in an unbounded comma-joined run-on (or a field with no terminal
-# punctuation at all) suppress every finding in the whole field -- exactly
-# the "check the inbox, then splice list_scheduled_tasks into the registry"
-# smuggle the check exists to catch. A fixed window bounds how far a verify
-# word may sit from the actual mention and still count.
+# punctuation at all) apply to the whole field. A fixed window bounds how
+# far the splice-action language may sit from the actual mention and still
+# count as describing THAT mention's mechanism.
 _REGISTRATION_DOCTRINE_WINDOW = 80
 
 
 def _registration_doctrine_flagged_excerpts(value: str, needle: str) -> list[str]:
     """Excerpts (needle +/- _REGISTRATION_DOCTRINE_WINDOW chars) around each
-    occurrence of `needle` in `value` that has no verification-context word
-    in that window. Pure."""
+    occurrence of `needle` in `value` that ALSO carries splice/hand-write
+    language in that same window -- positive evidence that list_scheduled_
+    tasks is being described as the write mechanism, not merely mentioned.
+
+    Case-insensitive on both the needle and the action regex (independent
+    review round 2, "case-sensitive needle bypass": the original used
+    value.find(), which would miss 'List_scheduled_tasks'/
+    'LIST_SCHEDULED_TASKS'). Excerpts are still sliced from the ORIGINAL
+    (not lowercased) text so error messages preserve real casing. Pure."""
     out = []
+    low = value.lower()
+    needle_low = needle.lower()
     start = 0
     while True:
-        idx = value.find(needle, start)
+        idx = low.find(needle_low, start)
         if idx == -1:
             break
         lo = max(0, idx - _REGISTRATION_DOCTRINE_WINDOW)
         hi = min(len(value), idx + len(needle) + _REGISTRATION_DOCTRINE_WINDOW)
         window = value[lo:hi]
-        if not _VERIFY_CONTEXT_RE.search(window):
+        if _SPLICE_ACTION_RE.search(window):
             out.append(window.strip())
-        start = idx + len(needle)
+        start = idx + len(needle_low)
     return out
 
 
 def check_registration_doctrine(handoff: dict) -> list[str]:
     """Return REGISTRATION-DOCTRINE VIOLATION error strings (empty if none)
-    for a handoff-shaped instance whose free-text fields reference
-    'list_scheduled_tasks' OUTSIDE a verification context.
+    for a handoff-shaped instance whose free-text fields describe using
+    'list_scheduled_tasks' AS the registration/write mechanism (splice/
+    hand-write language nearby -- see _registration_doctrine_flagged_
+    excerpts), not merely mentioning the tool.
 
     WHY (2026-08-22): scheduled-task registration doctrine (register-
     scheduled-task skill) is create_scheduled_task-only -- never a
@@ -310,11 +331,12 @@ def check_registration_doctrine(handoff: dict) -> list[str]:
     is not checked; a real file path containing that substring is not the
     failure mode this guards against.
 
-    NOT flagged: an occurrence with a verification word nearby (e.g.
-    "verified via list_scheduled_tasks", "re-check via list_scheduled_tasks
-    before acting") -- that is the skill's own mandatory evidence step, not
-    a violation. One error per offending occurrence, not per field/entry --
-    a field with two bad mentions must not read as a single finding."""
+    NOT flagged: a bare mention of list_scheduled_tasks with no splice/
+    hand-write language nearby (e.g. "verified via list_scheduled_tasks",
+    or doctrine-quoting prose like "list_scheduled_tasks is unavailable in
+    a cloud-sandbox session") -- neither describes doing the prohibited
+    thing. One error per offending occurrence, not per field/entry -- a
+    field with two bad mentions must not read as a single finding."""
     errors: list[str] = []
     needle = "list_scheduled_tasks"
 
@@ -324,7 +346,7 @@ def check_registration_doctrine(handoff: dict) -> list[str]:
             for excerpt in _registration_doctrine_flagged_excerpts(value, needle):
                 errors.append(
                     f"REGISTRATION-DOCTRINE VIOLATION: '{field}' references "
-                    f"'{needle}' outside a verification context ({excerpt!r}) "
+                    f"'{needle}' as a splice/hand-write mechanism ({excerpt!r}) "
                     "-- registration/tooling flows are create_scheduled_task-"
                     "only, never a list_scheduled_tasks-driven JSON-splice "
                     "(register-scheduled-task skill doctrine)."
@@ -338,7 +360,7 @@ def check_registration_doctrine(handoff: dict) -> list[str]:
             for excerpt in _registration_doctrine_flagged_excerpts(b, needle):
                 errors.append(
                     f"REGISTRATION-DOCTRINE VIOLATION: 'blockers' entry "
-                    f"references '{needle}' outside a verification context "
+                    f"references '{needle}' as a splice/hand-write mechanism "
                     f"({excerpt!r}) -- registration/tooling flows are "
                     "create_scheduled_task-only, never a list_scheduled_tasks-"
                     "driven JSON-splice (register-scheduled-task skill doctrine)."

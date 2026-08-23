@@ -144,9 +144,16 @@ class HandoffValidationTests(unittest.TestCase):
 
 
 class RegistrationDoctrineAdversarialTests(unittest.TestCase):
-    """Direct unit tests against check_registration_doctrine(), added
-    2026-08-22 per an independent review's two findings (M1, M2) on the
-    original sentence-splitting/substring-matching implementation."""
+    """Direct unit tests against check_registration_doctrine(). Round 1
+    (2026-08-22) fixed an independent review's M1 (unbounded sentence-
+    splitting) and M2 (substring matching) findings on a "flag unless a
+    verify word is nearby" design. Round 2 (same day, a second independent
+    review via qodo on the opened PR) found that design was ALSO too broad
+    in the other direction -- register-scheduled-task's own doctrine text
+    legitimately mentions list_scheduled_tasks with no verify word nearby --
+    and separately found the needle search itself was case-sensitive. Both
+    are fixed by switching to a positive-evidence design: flag only when
+    splice/hand-write language is nearby, case-insensitively."""
 
     def _handoff(self, **overrides):
         base = {
@@ -158,47 +165,57 @@ class RegistrationDoctrineAdversarialTests(unittest.TestCase):
         base.update(overrides)
         return base
 
-    def test_m1_verify_word_outside_the_context_window_does_not_suppress(self):
-        """Reviewer's M1 exploit, generalized: the old sentence-splitting
-        implementation had NO distance bound at all -- one verify word
-        anywhere in an unbounded comma-joined run-on (or a whole
-        punctuation-free field) suppressed every finding in it. The fixed
-        window (_REGISTRATION_DOCTRINE_WINDOW chars) must not be defeated by
-        placing the verify word further away than that window on either
-        side of the actual list_scheduled_tasks mention."""
+    def test_splice_language_outside_the_window_does_not_flag(self):
+        """The window bound still applies to the positive-evidence regex:
+        splice language further from the needle than
+        _REGISTRATION_DOCTRINE_WINDOW chars must not anchor to it."""
         pad = "x" * (validate._REGISTRATION_DOCTRINE_WINDOW + 20)
         h = self._handoff(context_summary=(
-            f"First check the inbox. {pad} "
-            "Then splice the entry from list_scheduled_tasks output "
-            "straight into the registry."
+            f"Spliced an unrelated config file earlier. {pad} "
+            "Separately, list_scheduled_tasks confirmed the entry is live."
         ))
         errors = validate.check_registration_doctrine(h)
-        self.assertTrue(errors, "M1 regression: a verify word outside the "
-                                "context window wrongly suppressed the finding")
+        self.assertEqual(errors, [], "splice language outside the window "
+                                     "wrongly anchored to a distant mention")
 
-    def test_m1_verify_word_just_inside_the_window_still_suppresses(self):
-        """Sanity check on the window's own boundary: a verify word that
-        genuinely IS close to the needle (within the window) must still
-        suppress -- the fix bounds distance, it doesn't ban proximity."""
+    def test_splice_language_inside_the_window_flags(self):
         h = self._handoff(context_summary=(
-            "Checked and then spliced list_scheduled_tasks output into the registry."
+            "Spliced the list_scheduled_tasks output directly into the registry."
+        ))
+        errors = validate.check_registration_doctrine(h)
+        self.assertTrue(errors)
+
+    def test_case_insensitive_needle_bypass_is_closed(self):
+        """qodo finding (PR #3, round 2): _registration_doctrine_flagged_
+        excerpts() originally used a case-sensitive str.find(), so
+        'List_scheduled_tasks'/'LIST_SCHEDULED_TASKS' evaded the check
+        entirely regardless of surrounding language."""
+        for variant in ("List_scheduled_tasks", "LIST_SCHEDULED_TASKS",
+                        "List_Scheduled_Tasks"):
+            h = self._handoff(context_summary=(
+                f"Splice the entry from {variant} output directly into the registry."
+            ))
+            errors = validate.check_registration_doctrine(h)
+            self.assertTrue(errors, f"case variant {variant!r} bypassed the check")
+
+    def test_doctrine_quoting_prose_without_splice_language_is_not_flagged(self):
+        """qodo finding (PR #3, round 2): register-scheduled-task's own
+        SKILL.md legitimately mentions list_scheduled_tasks with no
+        verification word AND no splice language nearby -- e.g. its surface
+        note on which sessions carry the MCP tools. A handoff that quotes
+        or relays that doctrine text must not be rejected."""
+        h = self._handoff(context_summary=(
+            "Per doctrine: create_scheduled_task/update_scheduled_task/"
+            "delete_scheduled_task/list_scheduled_tasks exist only in a "
+            "session running natively on-device; a cloud-sandbox Cowork "
+            "session never carries them."
         ))
         errors = validate.check_registration_doctrine(h)
         self.assertEqual(errors, [])
 
-    def test_m2_substring_word_does_not_suppress(self):
-        """Reviewer's exact M2 exploit: 'checklist' must not satisfy the
-        verification-context allowance via bare substring match on 'check'."""
-        h = self._handoff(context_summary=(
-            "Splice the list_scheduled_tasks entry into the registry checklist."
-        ))
-        errors = validate.check_registration_doctrine(h)
-        self.assertTrue(errors, "M2 regression: 'checklist' substring-matched "
-                                 "'check' and wrongly suppressed the finding")
-
-    def test_genuine_nearby_verify_word_still_suppresses(self):
-        """Control: a real verification word close to the needle must still
-        suppress -- the M1/M2 fixes must not turn this into a blanket ban."""
+    def test_genuine_nearby_verify_word_still_passes(self):
+        """Control: the doctrine-mandated 'verified via list_scheduled_tasks'
+        phrasing (no splice language) must pass cleanly."""
         h = self._handoff(required_next_action=(
             "Verified via list_scheduled_tasks that the entry is live."
         ))
