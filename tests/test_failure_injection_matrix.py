@@ -66,7 +66,7 @@ if str(TESTS_DIR) not in sys.path:
 
 import _aaos_common as aaos  # noqa: E402  (import after sys.path manipulation, by design)
 import validate  # noqa: E402  (tools/validate.py; scenarios #2, #6, #8, #10 drive it directly)
-from _tool_loader import load_tool  # noqa: E402
+from _tool_loader import load_tool, write_local_registry, derive_local_registry  # noqa: E402
 
 NOW = datetime(2026, 7, 9, 12, 0, 0, tzinfo=timezone(timedelta(hours=-4)))
 PROJECT = "ora-ops"
@@ -135,6 +135,11 @@ class BaseFailureMatrixTest(unittest.TestCase):
         os.environ["AAOS_SEAM_ROOT"] = str(self.root)
         for sub in ("tasks", "handoffs", "locks/_archive", "events"):
             (self.root / "projects" / PROJECT / sub).mkdir(parents=True, exist_ok=True)
+        # Registry whose write_scope names THIS checkout rather than the production
+        # registry's absolute C:/Users/Owner/AAOS/** -- see OI-263 and
+        # _tool_loader.derive_local_registry(). Scenario #10 posts a handoff whose
+        # artifact is docs/MIGRATIONS.md, a real in-repo file, so it depends on this.
+        self._registry_path = write_local_registry(self._tmpdir)
 
     def tearDown(self):
         if self._old_env is None:
@@ -144,6 +149,8 @@ class BaseFailureMatrixTest(unittest.TestCase):
         shutil.rmtree(self._tmpdir, ignore_errors=True)
 
     def run_tool(self, filename, *args):
+        if filename == "post-handoff.py" and "--registry" not in args:
+            args = (*args, "--registry", str(self._registry_path))
         module = load_tool(filename)
         buf_out, buf_err = io.StringIO(), io.StringIO()
         with contextlib.redirect_stdout(buf_out), contextlib.redirect_stderr(buf_err):

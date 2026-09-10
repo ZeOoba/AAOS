@@ -17,16 +17,23 @@ through tests/_tool_loader.py, since hyphenated filenames aren't
 The subprocess-driven end-to-end lifecycle lives in its own file,
 tests/test_e2e_lifecycle.py, per the design's explicit split.
 
-Registry note: post-handoff write-scope tests use the REAL repo-root
-agent-registry.json (tools/_aaos_common.load_registry()'s only source --
-there is no --registry override on post-handoff.py's CLI, per its
-literal design spec). claude-code's write_scope covers "C:/Users/Owner/
-AAOS/**", so tests that need a handoff to pass write-scope validation
-place their artifact file in a temp directory created *inside* the repo
-tree (tempfile.mkdtemp(dir=REPO_ROOT)), cleaned up in tearDown. Tests that
-need a write-scope *violation* instead place the artifact under the
-per-test OS-tmp seam root, which is outside every registered agent's
-write_scope.
+Registry note (revised 2026-09-10, OI-263): post-handoff write-scope tests
+validate against a registry DERIVED from the real repo-root
+agent-registry.json by _tool_loader.derive_local_registry(), which rebases
+claude-code's literal "C:/Users/Owner/AAOS/**" write_scope entry onto
+wherever this checkout actually lives. It is passed to post-handoff.py via
+its --registry flag (added in the same change; previously there was no such
+override, and these tests validated against the absolute path directly).
+
+That matters because tests needing a handoff to PASS write-scope validation
+place their artifact in a temp directory created *inside* the repo tree
+(tempfile.mkdtemp(dir=REPO_ROOT)), cleaned up in tearDown. Against the
+unmodified registry that only succeeded on a checkout physically located at
+C:/Users/Owner/AAOS -- so the assertions were pinned to one machine's
+directory layout rather than to match_write_scope()'s logic, and failed on
+every CI runner. Tests that need a write-scope *violation* still place the
+artifact under the per-test OS-tmp seam root, which is outside every
+registered agent's write_scope on any machine.
 
 Run with:  python -m unittest tests.test_queue_scripts -v   (from the repo root)
        or: python -m unittest discover -s tests -p "test_*.py" -v
@@ -55,7 +62,7 @@ if str(TOOLS_DIR) not in sys.path:
 import _aaos_common as aaos  # noqa: E402  (import after sys.path manipulation, by design)
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from _tool_loader import load_tool  # noqa: E402
+from _tool_loader import load_tool, write_local_registry, derive_local_registry  # noqa: E402
 
 NOW = datetime(2026, 7, 9, 12, 0, 0, tzinfo=timezone(timedelta(hours=-4)))
 PROJECT = "ora-ops"
@@ -529,28 +536,11 @@ class PostHandoffTestBase(ScriptTestBase):
     def setUp(self):
         super().setUp()
         self._artifacts_tmp = tempfile.mkdtemp(prefix="aaos-artifacts-", dir=str(REPO_ROOT))
-        self._registry_path = Path(self._artifacts_tmp) / "agent-registry.json"
-        self._registry_path.write_text(
-            json.dumps(self._derive_registry()), encoding="utf-8"
-        )
+        self._registry_path = write_local_registry(self._artifacts_tmp)
 
     @staticmethod
     def _derive_registry() -> dict:
-        """The production registry with every absolute C:/Users/Owner/AAOS/** entry
-        rebased onto this checkout's real location. Everything else is left alone so
-        the out-of-scope cases still exercise a realistic registry."""
-        registry = json.loads(
-            (REPO_ROOT / "agent-registry.json").read_text(encoding="utf-8")
-        )
-        canonical = "C:/Users/Owner/AAOS/**"
-        here = str(REPO_ROOT).replace("\\", "/").rstrip("/") + "/**"
-        for agent in registry["agents"]:
-            for field in ("write_scope", "reachable_paths"):
-                if field in agent:
-                    agent[field] = [
-                        here if entry == canonical else entry for entry in agent[field]
-                    ]
-        return registry
+        return derive_local_registry()
 
     def run_tool(self, filename, *args):
         """Inject --registry for post-handoff.py so write-scope validation resolves
@@ -652,20 +642,29 @@ class PostHandoffWriteScopeTests(PostHandoffTestBase):
         )
         self.assertEqual(code, 0, out)
 
-    def test_derived_registry_does_not_depend_on_checkout_location(self):
-        """The derived scope must name THIS checkout, whatever path it sits at.
+    def test_derived_registry_rebases_onto_the_given_checkout(self):
+        """The derived scope must name the checkout it is given, not a fixed path.
 
-        The bug OI-263 filed was invisible precisely because it only manifested off
-        one machine; this asserts the property directly rather than by running on CI.
+        Deliberately derives against a FOREIGN root. On the operating machine
+        REPO_ROOT is literally C:/Users/Owner/AAOS, so deriving against the default
+        would assert nothing here and the guard would only bite on CI -- which is
+        exactly how OI-263 stayed invisible for as long as it did.
         """
-        derived = self._derive_registry()
+        foreign = "/srv/checkouts/AAOS"
+        derived = derive_local_registry(repo_root=foreign)
         claude_code = next(a for a in derived["agents"] if a["id"] == "claude-code")
-        here = str(REPO_ROOT).replace("\\", "/").rstrip("/") + "/**"
-        self.assertIn(here, claude_code["write_scope"])
+
+        self.assertIn("/srv/checkouts/AAOS/**", claude_code["write_scope"])
         self.assertNotIn(
             "C:/Users/Owner/AAOS/**",
-            [s for s in claude_code["write_scope"] if s != here],
+            claude_code["write_scope"],
             "production absolute path survived derivation -- tests would re-couple to one machine",
+        )
+        # Unrelated scope entries must survive untouched, or the out-of-scope cases
+        # would start passing for the wrong reason.
+        self.assertTrue(
+            any("Claude_Workspace" in s for s in claude_code["write_scope"]),
+            "derivation clobbered scope entries it should have left alone",
         )
 
 
