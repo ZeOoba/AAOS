@@ -63,8 +63,17 @@ def _run_tool(tool_name, args, env):
     return proc.returncode, proc.stdout, proc.stderr
 
 
-def _run_validate(target_path):
+def _run_validate(target_path, registry_path=None):
+    """validate.py on one state file.
+
+    `registry_path` matters for the handoff: validate.py re-checks artifact
+    write_scope against the registry, so validating a handoff whose artifact lives
+    in this checkout needs the same derived registry post-handoff.py was given
+    (OI-263). Task and event files carry no artifact paths, so they don't need it.
+    """
     cmd = [sys.executable, str(TOOLS_DIR / "validate.py"), str(target_path)]
+    if registry_path is not None:
+        cmd += ["--registry", str(registry_path)]
     proc = subprocess.run(cmd, capture_output=True, text=True)
     return proc.returncode, proc.stdout, proc.stderr
 
@@ -145,7 +154,7 @@ class E2ELifecycleTests(unittest.TestCase):
         # --- Handoff file exists and re-validates. ---
         handoff_path = self.root / "projects" / PROJECT / "handoffs" / "h-e2e-lifecycle.json"
         self.assertTrue(handoff_path.exists())
-        code, out, err = _run_validate(handoff_path)
+        code, out, err = _run_validate(handoff_path, registry_path=self._registry_path)
         self.assertEqual(code, 0, out + err)
 
         # --- NDJSON event sequence is exactly this, in order. ---
