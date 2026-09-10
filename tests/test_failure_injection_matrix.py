@@ -66,7 +66,7 @@ if str(TESTS_DIR) not in sys.path:
 
 import _aaos_common as aaos  # noqa: E402  (import after sys.path manipulation, by design)
 import validate  # noqa: E402  (tools/validate.py; scenarios #2, #6, #8, #10 drive it directly)
-from _tool_loader import load_tool  # noqa: E402
+from _tool_loader import load_tool, write_local_registry, derive_local_registry  # noqa: E402
 
 NOW = datetime(2026, 7, 9, 12, 0, 0, tzinfo=timezone(timedelta(hours=-4)))
 PROJECT = "ora-ops"
@@ -135,6 +135,11 @@ class BaseFailureMatrixTest(unittest.TestCase):
         os.environ["AAOS_SEAM_ROOT"] = str(self.root)
         for sub in ("tasks", "handoffs", "locks/_archive", "events"):
             (self.root / "projects" / PROJECT / sub).mkdir(parents=True, exist_ok=True)
+        # Registry whose write_scope names THIS checkout rather than the production
+        # registry's absolute C:/Users/Owner/AAOS/** -- see OI-263 and
+        # _tool_loader.derive_local_registry(). Scenario #10 posts a handoff whose
+        # artifact is docs/MIGRATIONS.md, a real in-repo file, so it depends on this.
+        self._registry_path = write_local_registry(self._tmpdir)
 
     def tearDown(self):
         if self._old_env is None:
@@ -144,6 +149,8 @@ class BaseFailureMatrixTest(unittest.TestCase):
         shutil.rmtree(self._tmpdir, ignore_errors=True)
 
     def run_tool(self, filename, *args):
+        if filename == "post-handoff.py" and "--registry" not in args:
+            args = (*args, "--registry", str(self._registry_path))
         module = load_tool(filename)
         buf_out, buf_err = io.StringIO(), io.StringIO()
         with contextlib.redirect_stdout(buf_out), contextlib.redirect_stderr(buf_err):
@@ -310,7 +317,12 @@ class Scenario03TwoWritersRaceTests(unittest.TestCase):
             test_queue_scripts.LeaseTaskContestedTests,
         )
         self.assertTrue(result.wasSuccessful(), output)
-        self.assertEqual(result.testsRun, 2, output)
+        # Count guard against silent coverage LOSS -- raise it deliberately when you add
+        # coverage, never lower it to make a run go green. 2 -> 6 on 2026-09-10 (OI-264:
+        # the create is now atomic via hardlink, plus reader-side coverage -- mid-create
+        # contention denies, durable corruption still raises, the lock is never observable
+        # as zero bytes, and the retry budget actually waits).
+        self.assertEqual(result.testsRun, 6, output)
 
 
 # =============================================================================
@@ -599,7 +611,10 @@ class Scenario09WriteScopeViolationTests(unittest.TestCase):
     2's own finding-and-fix, with dedicated regression coverage:
       - tests/test_queue_scripts.py::PostHandoffWriteScopeTests (CLI
         level: an out-of-scope artifact -> post-handoff.py exits 1,
-        writes nothing, emits no HandoffPosted)
+        writes nothing, emits no HandoffPosted; plus, since OI-263, that
+        --registry actually changes the verdict rather than being accepted
+        and ignored, and that the derived scope names THIS checkout rather
+        than a hard-coded absolute path)
       - tests/test_validate.py::WriteScopeTraversalTests (validator level:
         a "../.." traversal path that resolves OUTSIDE scope is rejected;
         one that resolves back INSIDE scope is correctly accepted)
@@ -614,7 +629,9 @@ class Scenario09WriteScopeViolationTests(unittest.TestCase):
             test_validate.WriteScopeTraversalTests,
         )
         self.assertTrue(result.wasSuccessful(), output)
-        self.assertEqual(result.testsRun, 3, output)
+        # Count guard against silent coverage LOSS -- raise it deliberately when you add
+        # coverage, never lower it to make a run go green. 3 -> 5 on 2026-09-10 (OI-263).
+        self.assertEqual(result.testsRun, 5, output)
 
 
 # =============================================================================

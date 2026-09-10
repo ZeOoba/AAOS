@@ -17,12 +17,17 @@ EXACTLY TaskCreated, TaskLeased, HandoffPosted, Completed, Archived in
 order; and the task file, and the NDJSON file itself, also pass
 tools/validate.py.
 
-Registry note: post-handoff.py always validates against the REAL
-repo-root agent-registry.json (no --registry override on its CLI). The
-handoff's one artifact therefore lives in a temp directory created
-*inside* the git tree (tempfile.mkdtemp(dir=REPO_ROOT)) so it falls
-within claude-code's registered write_scope ("C:/Users/Owner/AAOS/**"),
-cleaned up in tearDown regardless of outcome.
+Registry note (revised 2026-09-10, OI-263): the handoff's one artifact
+lives in a temp directory created *inside* the git tree
+(tempfile.mkdtemp(dir=REPO_ROOT)) so it falls within claude-code's
+registered write_scope, cleaned up in tearDown regardless of outcome.
+That scope is declared in the production registry as the literal absolute
+"C:/Users/Owner/AAOS/**", so this only held on a checkout physically
+located there. The test now passes --registry (a flag added to
+post-handoff.py in the same change) pointing at
+_tool_loader.derive_local_registry()'s rebased copy, which names THIS
+checkout -- so the assertion tests write-scope matching rather than where
+the repo happens to sit.
 
 Run with:  python -m unittest tests.test_e2e_lifecycle -v   (from the repo root)
 """
@@ -41,6 +46,9 @@ from pathlib import Path
 REPO_ROOT = Path(__file__).resolve().parent.parent
 TOOLS_DIR = REPO_ROOT / "tools"
 
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from _tool_loader import write_local_registry  # noqa: E402  (after sys.path setup, by design)
+
 NOW = datetime(2026, 7, 9, 12, 0, 0, tzinfo=timezone(timedelta(hours=-4)))
 PROJECT = "ora-ops"
 
@@ -55,8 +63,17 @@ def _run_tool(tool_name, args, env):
     return proc.returncode, proc.stdout, proc.stderr
 
 
-def _run_validate(target_path):
+def _run_validate(target_path, registry_path=None):
+    """validate.py on one state file.
+
+    `registry_path` matters for the handoff: validate.py re-checks artifact
+    write_scope against the registry, so validating a handoff whose artifact lives
+    in this checkout needs the same derived registry post-handoff.py was given
+    (OI-263). Task and event files carry no artifact paths, so they don't need it.
+    """
     cmd = [sys.executable, str(TOOLS_DIR / "validate.py"), str(target_path)]
+    if registry_path is not None:
+        cmd += ["--registry", str(registry_path)]
     proc = subprocess.run(cmd, capture_output=True, text=True)
     return proc.returncode, proc.stdout, proc.stderr
 
@@ -69,6 +86,7 @@ class E2ELifecycleTests(unittest.TestCase):
             (self.root / "projects" / PROJECT / sub).mkdir(parents=True, exist_ok=True)
 
         self._artifacts_tmp = tempfile.mkdtemp(prefix="aaos-e2e-artifacts-", dir=str(REPO_ROOT))
+        self._registry_path = write_local_registry(self._artifacts_tmp)
 
         self.env = dict(os.environ)
         self.env["AAOS_SEAM_ROOT"] = str(self.root)
@@ -111,6 +129,7 @@ class E2ELifecycleTests(unittest.TestCase):
              "--next-action", "confirm and close",
              "--summary", "e2e lifecycle handoff",
              "--artifact", f"path={artifact_str}",
+             "--registry", str(self._registry_path),
              "--now", _iso(t2)],
             self.env,
         )
@@ -135,7 +154,7 @@ class E2ELifecycleTests(unittest.TestCase):
         # --- Handoff file exists and re-validates. ---
         handoff_path = self.root / "projects" / PROJECT / "handoffs" / "h-e2e-lifecycle.json"
         self.assertTrue(handoff_path.exists())
-        code, out, err = _run_validate(handoff_path)
+        code, out, err = _run_validate(handoff_path, registry_path=self._registry_path)
         self.assertEqual(code, 0, out + err)
 
         # --- NDJSON event sequence is exactly this, in order. ---

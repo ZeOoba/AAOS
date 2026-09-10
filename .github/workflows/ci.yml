@@ -1,0 +1,39 @@
+# AAOS CI. Until 2026-09-10 this repo had no CI at all (open-items-tracker.md#OI-259) -- its
+# 226 tests ran only when a human typed the command. AAOS owns the lease/lock discipline that
+# stops two agents clobbering each other's task state, and its one documented Critical bug (two
+# near-simultaneous appends to aaos-events.ndjson silently clobbering each other, see
+# docs/GATE3-REVIEW.md) is regression-guarded by those tests alone.
+#
+# No secrets, no data access, no self-hosted runner: the suite runs against per-test OS tmpdir
+# seam roots (tests/test_queue_scripts.py:28) and never touches the live OneDrive seam.
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        # 3.13 is what the operating machine runs. 3.11 guards against depending on a recent
+        # stdlib addition a Cowork sandbox might not have -- COWORK-BOOTSTRAP.md's Probe X runs
+        # tools/validate.py as a subprocess in whatever Python that sandbox provides.
+        python-version: ['3.11', '3.13']
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+          cache: 'pip'
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Run test suite
+        run: python -m unittest discover -s tests -p "test_*.py"

@@ -24,7 +24,11 @@ Blocked in addition to HandoffPosted.
 
 Registry note: this script always validates against the REAL repo-root
 agent-registry.json -- aaos.validate_obj("handoff", registry=None) loads
-it via aaos.load_registry(). There is no --registry override here,
+it via aaos.load_registry(). --registry overrides that path (added
+2026-09-10, OI-263: the write-scope tests could otherwise only pass on a
+checkout physically located at the registry's absolute C:/Users/Owner/AAOS,
+so they asserted a directory layout rather than match_write_scope()'s
+logic). Absent the flag the behaviour is unchanged,
 per the literal CLI spec in PHASE3-DESIGN.md section 2.5.
 
 Exit codes: see docs/PHASE3-DESIGN.md section 0.4.
@@ -94,6 +98,15 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument("--suggested-next-owner", default=None)
     parser.add_argument("--holder", default=None)
     parser.add_argument("--session", default=None)
+    parser.add_argument(
+        "--registry",
+        default=None,
+        help=(
+            "agent-registry.json to validate artifact write_scope against "
+            "(default: the repo-root registry). Mirrors validate.py's flag of the "
+            "same name; see OI-263 for why this seam exists."
+        ),
+    )
     _add_common_args(parser)
     return parser
 
@@ -144,7 +157,15 @@ def main(argv=None) -> int:
         if args.suggested_next_owner:
             handoff["suggested_next_owner"] = args.suggested_next_owner
 
-        errors = aaos.validate_obj(handoff, "handoff")
+        registry = None
+        if args.registry:
+            registry_file = Path(args.registry)
+            if not registry_file.is_file():
+                raise aaos.UsageError(f"--registry not found: {args.registry}")
+            import validate as _validate  # lazy: see _aaos_common.load_registry's cycle note
+            registry = _validate.load_registry(registry_file)
+
+        errors = aaos.validate_obj(handoff, "handoff", registry=registry)
         if errors:
             raise aaos.CorruptStateError(f"handoff failed validation: {errors}")
 

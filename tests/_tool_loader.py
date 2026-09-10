@@ -16,6 +16,7 @@ pattern tests/test_validate.py and tests/test_aaos_common.py already use.
 from __future__ import annotations
 
 import importlib.util
+import json
 import sys
 from pathlib import Path
 
@@ -42,3 +43,55 @@ def load_tool(filename: str):
     sys.modules[module_name] = module
     spec.loader.exec_module(module)
     return module
+
+
+# ---------------------------------------------------------------------------
+# Write-scope registry derivation (OI-263)
+#
+# agent-registry.json declares claude-code's write_scope as the literal absolute
+# "C:/Users/Owner/AAOS/**". Any test that builds an artifact under REPO_ROOT and
+# expects it to pass write-scope validation therefore only passes on a checkout
+# physically located at that path -- it asserts a directory layout rather than
+# match_write_scope()'s logic, and fails on every other machine and CI runner.
+#
+# These helpers rebase that one canonical entry onto wherever this checkout
+# actually is. Everything else in the registry is left alone, so out-of-scope
+# cases still validate against a realistic document. Tests pass the result to
+# post-handoff.py via its --registry flag; the production registry is untouched.
+# ---------------------------------------------------------------------------
+
+CANONICAL_REPO_GLOB = "C:/Users/Owner/AAOS/**"
+
+
+def local_repo_glob(repo_root=None) -> str:
+    """`repo_root` (default: this checkout) as a write_scope glob."""
+    return str(repo_root or REPO_ROOT).replace("\\", "/").rstrip("/") + "/**"
+
+
+def derive_local_registry(repo_root=None) -> dict:
+    """The production registry with CANONICAL_REPO_GLOB rebased onto `repo_root`.
+
+    `repo_root` is injectable ONLY so the regression test can prove the rebase
+    happens on a root that differs from this checkout's. On the operating machine
+    REPO_ROOT already equals CANONICAL_REPO_GLOB's directory, so a test that used
+    the default would assert nothing here and only carry meaning on CI.
+    """
+    registry = json.loads(
+        (REPO_ROOT / "agent-registry.json").read_text(encoding="utf-8")
+    )
+    here = local_repo_glob(repo_root)
+    for agent in registry["agents"]:
+        for field in ("write_scope", "reachable_paths"):
+            if field in agent:
+                agent[field] = [
+                    here if entry == CANONICAL_REPO_GLOB else entry
+                    for entry in agent[field]
+                ]
+    return registry
+
+
+def write_local_registry(directory) -> Path:
+    """Write derive_local_registry() into `directory`; return the path."""
+    path = Path(directory) / "agent-registry.json"
+    path.write_text(json.dumps(derive_local_registry()), encoding="utf-8")
+    return path
