@@ -2,9 +2,12 @@
 
 ## Status
 
-**Proposed** — not accepted. This revises a protocol whose thresholds ADR-0003 and
-AAOS-SPEC.md §7 fix by ratification, so it needs Gabriel's sign-off before any code
-changes against it. Nothing in this ADR has been implemented.
+**Accepted** — D3's thresholds ratified by Gabriel in-turn, 2026-09-10. Implementation may
+proceed against this ADR.
+
+Nothing here is implemented yet. D1, D2 and D4 are design decisions rather than ratified
+constants; D3 introduces a fourth threshold to a set AAOS-SPEC.md §7 fixes by ratification,
+which is what required sign-off.
 
 Supersedes nothing. Amends ADR-0003 (Locking and leasing model) §"Acquire protocol" and
 AAOS-SPEC.md §7. Tracked as OI-265 in ORA's open-items tracker (outside this repo); see
@@ -138,16 +141,51 @@ queue"), and must hold in `acquire_lease` **and** `reclaim_decision` — otherwi
 acquirer and the sweep disagree and the task is unleasable while the sweep stays silent,
 which is exactly the state attempt 2 left in place.
 
-Two constraints on the ceiling, both learned from attempt 2:
+**Ratified values (Gabriel, in-turn, 2026-09-10):**
 
-- It MUST carry clock-skew margin above the maximum admissible TTL. Attempt 2 set the
-  ceiling and the CLI's `--ttl-min` cap to the same number, making a maximum-length lease
+| Constant | Value | Derivation |
+|---|---|---|
+| `LEASE_TTL_CAP` | **45 minutes** | The ratified TTL itself. No caller may request a lease longer than the lease length the protocol ratified — otherwise "the TTL is 45 minutes" states nothing. `docs/CODE-ADAPTER.md` already directs that a job which will overrun be re-scoped into a smaller task "rather than raced against expiry", so nothing legitimate needs more. |
+| `LEASE_EXPIRY_CEILING` | **90 minutes (2 × ratified TTL)** | A lock claiming an expiry further ahead than this is not believed. |
+
+Deriving the ceiling rather than picking it:
+
+- Renewal is **specified but not implemented** — there is no renew tool and no
+  `LeaseRenewed` emitter in `tools/`, though ADR-0003 conditions reclamation on "no
+  renewal on record". So today `expires` is always `acquired + ttl` and is never bumped.
+  Should renewal ship, a renewal sets `expires = renewal_time + ttl`, so the bound below
+  holds either way; this derivation does not depend on renewal staying unimplemented.
+- From the writer's clock, a legitimate lock therefore satisfies
+  `expires ≤ write_time + LEASE_TTL_CAP`.
+- The writer's clock may lead the reader's by up to the ratified 5-minute skew, so from a
+  reader's view a legitimate lock satisfies `expires ≤ now + 45 + 5 = 50 minutes`.
+- **50 minutes is the floor, not the answer.** The consequences are asymmetric: judging a
+  live lock bogus is a *steal* (a double-acquire — the defect this ADR exists to close),
+  while believing a bogus lock too long is a *bounded wait*. AAOS-SPEC.md §7 fixes the
+  direction for exactly this trade — "erring toward waiting longer rather than reclaiming
+  too early" — so the ceiling takes margin, not the minimum.
+- **90 minutes** gives 40 minutes of headroom over the floor (8× the skew allowance) while
+  bounding a wedge to ~90 minutes rather than 24 hours or forever. Expressed as 2× the
+  ratified TTL it is a derived quantity, not a fourth independent magic number, which is
+  the property §7 demands of every threshold it fixes.
+
+Two constraints this encodes, both learned from attempt 2:
+
+- The ceiling MUST sit strictly above the `--ttl-min` cap with skew margin between them.
+  Attempt 2 set them to the same number (1440/1440), making a maximum-length lease
   stealable after one second of backward drift — converting an anti-wedge rule into a
-  double-acquire.
-- Introducing it changes a ratified threshold set (AAOS-SPEC.md §7 fixes three: TTL 45 min,
-  skew 5 min, settle 30 s). A fourth threshold requires the same ratification and a
-  matching edit to AAOS-SPEC.md §7, ADR-0003, and `docs/CODE-ADAPTER.md`. **A ceiling far
-  above the ratified 45-minute TTL only bounds the wedge; a ceiling near it prevents one.**
+  double-acquire. Here the gap is 45 minutes.
+- The comparison is strict (`now + CEILING < expires`), so a lock sitting exactly at the
+  ceiling is believed.
+
+This changes a threshold set AAOS-SPEC.md §7 fixes by ratification (TTL 45 min, skew
+5 min, settle 30 s), so it requires matching edits to AAOS-SPEC.md §7, ADR-0003 and
+`docs/CODE-ADAPTER.md` as part of implementation — see Consequences.
+
+*Note on authorship of these numbers: Gabriel ratified D3; the specific values above were
+derived by Claude from the existing ratified constants using the reasoning shown. Changing
+either is a one-line edit plus the threshold-doc updates — the derivation, not the
+numbers, is the part that should survive review.*
 
 ### D4 — Verification obligations
 
@@ -175,9 +213,10 @@ a verification failure as much as a design one.
 | `tools/_aaos_common.py` | `acquire_lease` steps 1 and 3 decide from the lock; ownership transfer becomes the D2 CAS; one liveness rule shared with `reclaim_decision`; `reclaimed_prior` reports the lock actually archived |
 | `tools/_aaos_common.py` | `assert_lease_held` verifies against the lock file (D1) — this is a behaviour change to the double-run backstop and needs its own tests |
 | `tools/expire-leases.py` | `reclaim_decision` honours the D3 ceiling; sweep enumeration accounts for any new intermediate filenames rather than filtering by an ad-hoc name fragment |
-| `tools/lease-task.py` | `--ttl-min` bounded strictly below the D3 ceiling; a catch-all so no non-`AaosError` escapes as a bare traceback |
-| `docs/AAOS-SPEC.md` §7 | State D1 explicitly; correct the `assert_lease_held` sentence, which currently claims a protection that artifact cannot provide; document the fourth threshold |
+| `tools/lease-task.py` | `--ttl-min` capped at `LEASE_TTL_CAP` (45), strictly below the 90-minute ceiling; a catch-all so no non-`AaosError` escapes as a bare traceback |
+| `docs/AAOS-SPEC.md` §7 | State D1 explicitly; correct the `assert_lease_held` sentence, which currently claims a protection that artifact cannot provide; document `LEASE_EXPIRY_CEILING` as a derived fourth threshold |
 | `docs/adr/0003-locking-model.md` | Cross-reference this ADR at the acquire protocol |
+| `docs/CODE-ADAPTER.md` | Note that `--ttl-min` is now capped, reinforcing its existing "re-scope rather than race expiry" guidance |
 
 ### Accepted costs
 
@@ -194,6 +233,15 @@ a verification failure as much as a design one.
   sufficient; deleting the projection is a larger change with no demonstrated defect
   behind it.
 - OI-266's sidecar leak, except where D2's mechanism subsumes it.
+- **Lease renewal.** Surfaced while deriving D3: renewal is specified in three places —
+  AAOS-SPEC.md §7 and §"Lease expiry is 45 minutes, renewable", and ADR-0003 §32 ("The
+  lease is renewable: the holder can request a renewal before expiry, emitting a
+  `LeaseRenewed` event") — and **is not implemented**. There is no renew tool and no
+  `LeaseRenewed` emitter in `tools/`. This is load-bearing beyond documentation drift:
+  ADR-0003's reclamation rule conditions reclaim on "no renewal on record", a clause that
+  can never be false today, and a long-running holder has no way to keep a lease it is
+  actively using. Filed separately; not fixed here. D3's derivation is stated to hold
+  either way, so implementing renewal later does not invalidate the ceiling.
 
 ### If this is not done
 
