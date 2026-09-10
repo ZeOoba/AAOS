@@ -599,7 +599,10 @@ class Scenario09WriteScopeViolationTests(unittest.TestCase):
     2's own finding-and-fix, with dedicated regression coverage:
       - tests/test_queue_scripts.py::PostHandoffWriteScopeTests (CLI
         level: an out-of-scope artifact -> post-handoff.py exits 1,
-        writes nothing, emits no HandoffPosted)
+        writes nothing, emits no HandoffPosted; plus, since OI-263, that
+        --registry actually changes the verdict rather than being accepted
+        and ignored, and that the derived scope names THIS checkout rather
+        than a hard-coded absolute path)
       - tests/test_validate.py::WriteScopeTraversalTests (validator level:
         a "../.." traversal path that resolves OUTSIDE scope is rejected;
         one that resolves back INSIDE scope is correctly accepted)
@@ -614,7 +617,9 @@ class Scenario09WriteScopeViolationTests(unittest.TestCase):
             test_validate.WriteScopeTraversalTests,
         )
         self.assertTrue(result.wasSuccessful(), output)
-        self.assertEqual(result.testsRun, 3, output)
+        # Count guard against silent coverage LOSS -- raise it deliberately when you add
+        # coverage, never lower it to make a run go green. 3 -> 5 on 2026-09-10 (OI-263).
+        self.assertEqual(result.testsRun, 5, output)
 
 
 # =============================================================================

@@ -513,13 +513,51 @@ class FailTaskDoubleFailureEscalationTests(ScriptTestBase):
 # ---------------------------------------------------------------------------
 
 class PostHandoffTestBase(ScriptTestBase):
-    """Adds a temp directory *inside* the git tree (under REPO_ROOT) for
-    artifacts that must pass real write-scope validation against
-    claude-code's registered write_scope ("C:/Users/Owner/AAOS/**")."""
+    """Adds a temp directory *inside* the git tree (under REPO_ROOT) for artifacts
+    that must pass real write-scope validation, plus a registry whose write_scope
+    is DERIVED from REPO_ROOT at runtime.
+
+    Why the derived registry (OI-263): the production agent-registry.json declares
+    claude-code's write_scope as the literal absolute "C:/Users/Owner/AAOS/**". These
+    tests previously validated against it directly, so "in scope" was true only while
+    this checkout happened to sit at that exact path -- they asserted a directory
+    layout, not match_write_scope()'s logic, and failed on any other machine or CI
+    runner. Deriving the scope from REPO_ROOT makes the positive-path assertions test
+    the matcher, and keeps the production registry untouched.
+    """
 
     def setUp(self):
         super().setUp()
         self._artifacts_tmp = tempfile.mkdtemp(prefix="aaos-artifacts-", dir=str(REPO_ROOT))
+        self._registry_path = Path(self._artifacts_tmp) / "agent-registry.json"
+        self._registry_path.write_text(
+            json.dumps(self._derive_registry()), encoding="utf-8"
+        )
+
+    @staticmethod
+    def _derive_registry() -> dict:
+        """The production registry with every absolute C:/Users/Owner/AAOS/** entry
+        rebased onto this checkout's real location. Everything else is left alone so
+        the out-of-scope cases still exercise a realistic registry."""
+        registry = json.loads(
+            (REPO_ROOT / "agent-registry.json").read_text(encoding="utf-8")
+        )
+        canonical = "C:/Users/Owner/AAOS/**"
+        here = str(REPO_ROOT).replace("\\", "/").rstrip("/") + "/**"
+        for agent in registry["agents"]:
+            for field in ("write_scope", "reachable_paths"):
+                if field in agent:
+                    agent[field] = [
+                        here if entry == canonical else entry for entry in agent[field]
+                    ]
+        return registry
+
+    def run_tool(self, filename, *args):
+        """Inject --registry for post-handoff.py so write-scope validation resolves
+        against the derived registry above rather than the production one."""
+        if filename == "post-handoff.py" and "--registry" not in args:
+            args = (*args, "--registry", str(self._registry_path))
+        return super().run_tool(filename, *args)
 
     def tearDown(self):
         shutil.rmtree(self._artifacts_tmp, ignore_errors=True)
@@ -572,6 +610,63 @@ class PostHandoffWriteScopeTests(PostHandoffTestBase):
         self.assertEqual(code, 1, out)
         self.assertIsNone(aaos.load_handoff("h-scope-violation", PROJECT, root=str(self.root)))
         self.assertEqual(self.count_events("HandoffPosted"), 0)
+
+    def test_registry_override_is_honoured_not_ignored(self):
+        """--registry must actually change the verdict (OI-263).
+
+        Guards two failure modes at once: an override that argparse accepts and the
+        code then ignores, and a regression back to validating against the production
+        registry's machine-absolute write_scope. Same artifact, two registries, two
+        verdicts -- so the assertion can only pass if the flag is really consulted.
+        """
+        self.seed_task("t-handoff-registry")
+        artifact = self.make_in_scope_artifact()
+
+        narrow = json.loads(self._registry_path.read_text(encoding="utf-8"))
+        for agent in narrow["agents"]:
+            if agent["id"] == "claude-code":
+                agent["write_scope"] = ["https://nowhere.invalid/**"]
+        narrow_path = Path(self._artifacts_tmp) / "narrow-registry.json"
+        narrow_path.write_text(json.dumps(narrow), encoding="utf-8")
+
+        code, out = self.run_tool(
+            "post-handoff.py",
+            "--id", "h-registry-narrow", "--task", "t-handoff-registry",
+            "--from", "claude-code", "--to", "cowork",
+            "--next-action", "n/a", "--summary", "s",
+            "--artifact", f"path={artifact}",
+            "--now", _iso(NOW),
+            "--registry", str(narrow_path),
+        )
+        self.assertEqual(code, 1, out)
+        self.assertIn("WRITE-SCOPE VIOLATION", out)
+
+        # Identical call, default (derived) registry -> accepted.
+        code, out = self.run_tool(
+            "post-handoff.py",
+            "--id", "h-registry-wide", "--task", "t-handoff-registry",
+            "--from", "claude-code", "--to", "cowork",
+            "--next-action", "n/a", "--summary", "s",
+            "--artifact", f"path={artifact}",
+            "--now", _iso(NOW),
+        )
+        self.assertEqual(code, 0, out)
+
+    def test_derived_registry_does_not_depend_on_checkout_location(self):
+        """The derived scope must name THIS checkout, whatever path it sits at.
+
+        The bug OI-263 filed was invisible precisely because it only manifested off
+        one machine; this asserts the property directly rather than by running on CI.
+        """
+        derived = self._derive_registry()
+        claude_code = next(a for a in derived["agents"] if a["id"] == "claude-code")
+        here = str(REPO_ROOT).replace("\\", "/").rstrip("/") + "/**"
+        self.assertIn(here, claude_code["write_scope"])
+        self.assertNotIn(
+            "C:/Users/Owner/AAOS/**",
+            [s for s in claude_code["write_scope"] if s != here],
+            "production absolute path survived derivation -- tests would re-couple to one machine",
+        )
 
 
 class PostHandoffMissingArtifactTests(PostHandoffTestBase):
