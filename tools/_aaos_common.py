@@ -554,6 +554,9 @@ def _scan_for_conflicts(locks_dir: Path, task_id: str, holder: str, session: str
 
 
 def _exclusive_create(path: Path, data: bytes) -> None:
+    """Create `path` exclusively. NOT atomic: the file exists, empty, between the
+    O_EXCL create and the write. Prefer _exclusive_link() for lock files, which has no
+    such window. Retained for callers with no staged sidecar to link from."""
     flags = os.O_CREAT | os.O_EXCL | os.O_WRONLY
     if hasattr(os, "O_BINARY"):
         flags |= os.O_BINARY
@@ -562,6 +565,81 @@ def _exclusive_create(path: Path, data: bytes) -> None:
         os.write(fd, data)
     finally:
         os.close(fd)
+
+
+def _exclusive_link(source: Path, dest: Path, data: bytes) -> None:
+    """Atomically publish `source` (already fully written) at `dest`, exclusively.
+
+    AAOS-SPEC.md section 7 step 3 calls this "an atomic exclusive create". Until 2026-09-10
+    it was not: _exclusive_create() creates with O_EXCL and writes the JSON as a SEPARATE
+    syscall, so the lock file was observable as zero bytes between the two. Every reader of
+    that directory could see it -- the FileExistsError branch below, _scan_for_conflicts(),
+    and expire-leases.py -- and each turned a routine contended lease into a corruption
+    signal, a false CONTESTED, or a human escalation respectively (OI-264).
+
+    os.link() is atomic and fails with FileExistsError on collision, so it preserves the
+    exclusivity guarantee exactly while making the file appear complete or not at all. It
+    also survives a crash mid-create: die before the link and there is no lock; die after
+    and the lock is whole. A retry loop cannot fix that case at all.
+
+    Falls back to _exclusive_create() only if the filesystem refuses hardlinks (OSError
+    that is NOT FileExistsError -- a collision must still propagate). Verified working on
+    this deployment's NTFS; the fallback exists because the seam is OneDrive-synced and
+    hardlink support is a filesystem property we should not assume for all time.
+    """
+    try:
+        os.link(str(source), str(dest))
+    except FileExistsError:
+        raise
+    except OSError:
+        _exclusive_create(dest, data)
+
+
+#: Bounded re-read of an unparseable incumbent lock. This is a SAFETY NET, not the fix:
+#: _exclusive_link() removes AAOS's own create-then-write window entirely, so no AAOS
+#: writer can leave a zero-byte lock any more. What remains is a foreign or partially
+#: synced file -- the seam is OneDrive-backed. Deliberately NOT sized against
+#: AAOS-SPEC.md section 7's 30s propagation allowance: this runs on the DENIED path where a
+#: caller is waiting, and a lock that is still unparseable after ~100ms is far more likely
+#: to be genuinely damaged (e.g. a process killed between create and write by an older
+#: build) than mid-flight. A slow foreign partial write still raises, by design.
+_LOCK_SETTLE_ATTEMPTS = 5
+_LOCK_SETTLE_DELAY_SEC = 0.025
+
+
+def _load_incumbent_lock(task_id: str, project_id: str, *, root: str | None = None) -> dict | None:
+    """load_lock(), tolerating a briefly-unparseable lock (OI-264).
+
+    An incumbent lock that is unparseable for an instant means "a writer holds it and is
+    mid-publish" -- contention, whose protocol answer is DENIED. Before this, the first
+    unparseable read propagated CorruptStateError straight out of acquire_lease, so a
+    contended lease surfaced as damaged state: outside the ACQUIRED/DENIED/CONTESTED
+    contract in AAOS-SPEC.md section 7, and inviting the operator response for corruption
+    (inspect/repair) instead of the correct one (back off and retry).
+
+    A lock still unparseable after the window is genuinely damaged and still raises -- this
+    widens no fail-open path, it only distinguishes transient from durable.
+
+    Uses time.sleep directly rather than acquire_lease's injectable `sleep`: that parameter
+    exists so tests can stub out the 30s protocol settle, and stubbing it must not silently
+    disable this physical wait too.
+    """
+    for attempt in range(_LOCK_SETTLE_ATTEMPTS):
+        try:
+            return load_lock(task_id, project_id, root=root)
+        except CorruptStateError:
+            # Re-raise from inside the except on the final attempt, so correctness does
+            # not depend on _LOCK_SETTLE_ATTEMPTS being >= 1. Binding the exception and
+            # raising it after the loop would become `raise None` -> TypeError, escaping
+            # the AaosError hierarchy every caller's handlers are built on, if anyone ever
+            # tuned that constant to 0.
+            if attempt == _LOCK_SETTLE_ATTEMPTS - 1:
+                raise
+            time.sleep(_LOCK_SETTLE_DELAY_SEC)
+    raise CorruptStateError(  # unreachable while _LOCK_SETTLE_ATTEMPTS >= 1
+        f"lock for {task_id} unreadable and retry loop did not execute "
+        f"(_LOCK_SETTLE_ATTEMPTS={_LOCK_SETTLE_ATTEMPTS})"
+    )
 
 
 def acquire_lease(
@@ -637,11 +715,14 @@ def acquire_lease(
     # ---- 3. Exclusive create ----
     os.makedirs(final_lock_path.parent, exist_ok=True)
     try:
-        _exclusive_create(final_lock_path, content_bytes)
+        _exclusive_link(sidecar, final_lock_path, content_bytes)
         _cleanup_sidecar()
     except FileExistsError:
         try:
-            incumbent = load_lock(task_id, project_id, root=root)
+            # Not load_lock() directly: the rival that just won the O_EXCL create may not
+            # have written its JSON yet, and a zero-byte read here is contention, not
+            # corruption (OI-264). Still raises if it stays unparseable.
+            incumbent = _load_incumbent_lock(task_id, project_id, root=root)
         except CorruptStateError:
             _cleanup_sidecar()
             raise
@@ -657,7 +738,7 @@ def acquire_lease(
         if not incumbent_live:
             archive_lock(final_lock_path, now=resolved_now)
             try:
-                _exclusive_create(final_lock_path, content_bytes)
+                _exclusive_link(sidecar, final_lock_path, content_bytes)
                 _cleanup_sidecar()
             except FileExistsError:
                 archive_lock(sidecar, now=resolved_now)

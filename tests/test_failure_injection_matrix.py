@@ -317,7 +317,12 @@ class Scenario03TwoWritersRaceTests(unittest.TestCase):
             test_queue_scripts.LeaseTaskContestedTests,
         )
         self.assertTrue(result.wasSuccessful(), output)
-        self.assertEqual(result.testsRun, 2, output)
+        # Count guard against silent coverage LOSS -- raise it deliberately when you add
+        # coverage, never lower it to make a run go green. 2 -> 6 on 2026-09-10 (OI-264:
+        # the create is now atomic via hardlink, plus reader-side coverage -- mid-create
+        # contention denies, durable corruption still raises, the lock is never observable
+        # as zero bytes, and the retry budget actually waits).
+        self.assertEqual(result.testsRun, 6, output)
 
 
 # =============================================================================

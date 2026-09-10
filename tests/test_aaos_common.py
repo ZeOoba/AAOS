@@ -20,6 +20,7 @@ import shutil
 import sys
 import tempfile
 import threading
+import time
 import unittest
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -269,6 +270,150 @@ class AcquireLeaseRaceTests(BaseAaosTest):
                 sorted(o.value for o in outcomes),
                 sorted([aaos.LeaseOutcome.ACQUIRED.value, aaos.LeaseOutcome.DENIED.value]),
                 f"iteration {i}: outcomes were {outcomes!r}",
+            )
+
+    def test_incumbent_lock_mid_create_denies_instead_of_raising(self):
+        """A rival observed MID-CREATE is contended, not corrupt (OI-264).
+
+        _exclusive_create() creates the lock with O_EXCL and writes its JSON as a
+        separate syscall, so the loser of the create race can read a zero-byte file.
+        Before this fix that surfaced as CorruptStateError escaping acquire_lease
+        entirely -- so the loser produced NO outcome rather than DENIED, and a
+        routine contended lease presented as damaged state. Deterministic here:
+        the transient unparseable read is injected rather than raced for.
+        """
+        task_id = "t-midcreate"
+        aaos.save_task(_make_task(task_id), root=str(self.root))
+
+        first = aaos.acquire_lease(
+            task_id, PROJECT, "claude-code", "sess-a",
+            now=NOW, settle_seconds=0, root=str(self.root),
+        )
+        self.assertEqual(first.outcome, aaos.LeaseOutcome.ACQUIRED)
+
+        real_load_lock = aaos.load_lock
+        calls = {"n": 0}
+
+        def flaky_load_lock(*args, **kwargs):
+            calls["n"] += 1
+            if calls["n"] == 1:
+                raise aaos.CorruptStateError("simulated zero-byte lock mid-create")
+            return real_load_lock(*args, **kwargs)
+
+        aaos.load_lock = flaky_load_lock
+        try:
+            second = aaos.acquire_lease(
+                task_id, PROJECT, "cowork", "sess-b",
+                now=NOW, settle_seconds=0, root=str(self.root),
+            )
+        finally:
+            aaos.load_lock = real_load_lock
+
+        self.assertEqual(second.outcome, aaos.LeaseOutcome.DENIED, second)
+        self.assertGreaterEqual(
+            calls["n"], 2, "the unparseable incumbent read was never retried"
+        )
+
+    def test_lock_is_never_observable_as_partially_written(self):
+        """The create must be ATOMIC, not merely retried around (OI-264).
+
+        This is the test for the actual fix. _exclusive_link() publishes the lock by
+        hardlinking an already-fully-written sidecar, so the file appears complete or not
+        at all. The previous implementation created with O_EXCL and wrote the JSON as a
+        separate syscall, leaving it observable as zero bytes in between -- which
+        _scan_for_conflicts() and expire-leases.py also read, and misread.
+
+        Asserted structurally rather than by racing: a watcher thread hammers the lock
+        path throughout the acquire and records every size it ever sees. Zero is a
+        failure. Racing for it would make this test probabilistic, and a probabilistic
+        guard on a concurrency primitive is how OI-264 survived in the first place.
+        """
+        task_id = "t-atomic-create"
+        aaos.save_task(_make_task(task_id), root=str(self.root))
+        lock_file = aaos.lock_path(task_id, PROJECT, root=str(self.root))
+        lock_file.parent.mkdir(parents=True, exist_ok=True)
+
+        seen_sizes = []
+        stop = threading.Event()
+
+        def watcher():
+            while not stop.is_set():
+                try:
+                    seen_sizes.append(lock_file.stat().st_size)
+                except OSError:
+                    pass  # not created yet, or already gone
+
+        t = threading.Thread(target=watcher, daemon=True)
+        t.start()
+        try:
+            result = aaos.acquire_lease(
+                task_id, PROJECT, "claude-code", "sess-a",
+                now=NOW, settle_seconds=0, root=str(self.root),
+            )
+        finally:
+            stop.set()
+            t.join(timeout=5)
+
+        self.assertEqual(result.outcome, aaos.LeaseOutcome.ACQUIRED)
+        self.assertTrue(seen_sizes, "watcher never observed the lock file at all")
+        self.assertNotIn(
+            0, seen_sizes,
+            "lock file was observable as zero bytes -- the create is not atomic",
+        )
+
+    def test_unparseable_incumbent_read_is_actually_retried_with_a_wait(self):
+        """The retry must WAIT, not busy-loop (OI-264 review finding).
+
+        The first version of these tests asserted only the retry COUNT, so they passed
+        with _LOCK_SETTLE_DELAY_SEC = 0 -- an implementation that fixes nothing. Duration
+        is the only axis the safety net trades on, so it is the axis to assert.
+        """
+        task_id = "t-retry-waits"
+        aaos.save_task(_make_task(task_id), root=str(self.root))
+        lock_file = aaos.lock_path(task_id, PROJECT, root=str(self.root))
+        lock_file.parent.mkdir(parents=True, exist_ok=True)
+        lock_file.write_bytes(b"")  # durably unparseable -> exhausts the whole budget
+
+        started = time.monotonic()
+        with self.assertRaises(aaos.CorruptStateError):
+            aaos.acquire_lease(
+                task_id, PROJECT, "cowork", "sess-b",
+                now=NOW, settle_seconds=0, root=str(self.root),
+            )
+        elapsed = time.monotonic() - started
+
+        # ABSOLUTE floor, deliberately not derived from _LOCK_SETTLE_DELAY_SEC. Deriving
+        # the expectation from the constant under test is what made the first version of
+        # this assertion vacuous: with the constant mutated to 0 it asserted `elapsed >= 0`
+        # and passed against an implementation that waits not at all. If someone lowers the
+        # budget below this floor, this test SHOULD fail and force the conversation.
+        MIN_REAL_WAIT_SEC = 0.04
+        self.assertGreaterEqual(
+            elapsed, MIN_REAL_WAIT_SEC,
+            f"exhausting the retry budget took {elapsed:.4f}s, under the {MIN_REAL_WAIT_SEC}s "
+            f"floor -- the retry is not actually waiting, so it fixes nothing "
+            f"(_LOCK_SETTLE_ATTEMPTS={aaos._LOCK_SETTLE_ATTEMPTS}, "
+            f"_LOCK_SETTLE_DELAY_SEC={aaos._LOCK_SETTLE_DELAY_SEC}).",
+        )
+
+    def test_incumbent_lock_permanently_unparseable_still_raises(self):
+        """Retrying must NOT swallow real corruption (OI-264).
+
+        The retry window exists for a lock that is briefly empty because a rival is
+        mid-create. A lock that is STILL unparseable after that window is genuinely
+        damaged, and must keep raising -- CorruptStateError is the signal
+        docs/OPERATIONS.md's runbook acts on.
+        """
+        task_id = "t-corrupt-lock"
+        aaos.save_task(_make_task(task_id), root=str(self.root))
+        lock_file = aaos.lock_path(task_id, PROJECT, root=str(self.root))
+        lock_file.parent.mkdir(parents=True, exist_ok=True)
+        lock_file.write_bytes(b"")  # never becomes valid
+
+        with self.assertRaises(aaos.CorruptStateError):
+            aaos.acquire_lease(
+                task_id, PROJECT, "cowork", "sess-b",
+                now=NOW, settle_seconds=0, root=str(self.root),
             )
 
 
