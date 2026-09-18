@@ -352,6 +352,17 @@ class DrainLockMutualExclusionTests(unittest.TestCase):
         self.assertIsNotNone(second, "a corrupt lock wedged draining")
         self.assertEqual(len(self._archived_locks()), 1, "corrupt lock must be archived, not deleted")
 
+    def test_valid_utf8_but_invalid_json_lock_content_is_stale_immediately(self):
+        # REFUTE M12: readable-and-valid-UTF-8-but-not-JSON (or JSON missing
+        # `acquired`) must be judged stale on this read, not merely once its
+        # mtime ages past _DRAIN_LOCK_STALE_MINUTES -- a live lock with this
+        # content can never legitimately exist (_try_acquire_drain_lock only
+        # ever publishes well-formed JSON), so there is nothing to protect.
+        aaos._exclusive_publish(self.lock_path, b"not json at all")
+        second = aaos._try_acquire_drain_lock(PROJECT, root=str(self.root))
+        self.assertIsNotNone(second, "invalid-JSON lock content wedged draining")
+        self.assertEqual(len(self._archived_locks()), 1, "invalid-JSON lock must be archived, not deleted")
+
     def test_pending_file_vanishing_under_a_held_lock_is_reported_loudly(self):
         # A pending file disappearing while we hold the exclusive lock is
         # the fingerprint of a second drainer. Never a silent skip.
