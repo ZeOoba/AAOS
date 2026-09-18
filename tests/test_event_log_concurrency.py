@@ -31,6 +31,8 @@ Run standalone:
 """
 from __future__ import annotations
 
+import contextlib
+import io
 import json
 import os
 import shutil
@@ -38,6 +40,7 @@ import sys
 import tempfile
 import threading
 import unittest
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from unittest import mock
 
@@ -263,6 +266,118 @@ class DrainLockMutualExclusionTests(unittest.TestCase):
 
         self.assertIsNotNone(second, "an aged unreadable lock wedged draining forever")
         self.assertEqual(len(self._archived_locks()), 1, "stale lock must be archived, not deleted")
+
+    def _deny_lock_reads(self):
+        real_read_text = Path.read_text
+
+        def deny(path_self, *args, **kwargs):
+            if Path(path_self) == self.lock_path:
+                raise PermissionError(13, "simulated sharing violation")
+            return real_read_text(path_self, *args, **kwargs)
+
+        return mock.patch.object(Path, "read_text", deny)
+
+    def test_unreadable_fresh_lock_fails_closed_even_under_a_far_future_injected_now(self):
+        # REFUTE finding F2: mtime is a real filesystem time, so the
+        # fallback must never be measured against an injected `now`.
+        held = aaos._try_acquire_drain_lock(PROJECT, root=str(self.root))
+        self.assertIsNotNone(held)
+        far_future = datetime.now(timezone.utc) + timedelta(days=30)
+        with self._deny_lock_reads():
+            second = aaos._try_acquire_drain_lock(PROJECT, root=str(self.root), now=far_future)
+        self.assertIsNone(second, "an injected clock made a seconds-old unreadable lock look stale")
+        self.assertEqual(self._archived_locks(), [])
+
+    def test_unreadable_lock_released_before_stat_is_not_stale_and_c_survives(self):
+        # Same race as the first test, entered through the fallback: the
+        # read fails, the holder releases before the stat, C acquires.
+        held_by_a = aaos._try_acquire_drain_lock(PROJECT, root=str(self.root))
+        self.assertIsNotNone(held_by_a)
+        real_stat = os.stat
+        state = {}
+
+        def a_releases_then_c_acquires(path, *args, **kwargs):
+            if str(path) != str(self.lock_path) or "c" in state:
+                return real_stat(path, *args, **kwargs)
+            aaos._release_drain_lock(held_by_a)
+            try:
+                return real_stat(path, *args, **kwargs)
+            finally:
+                state["c"] = None  # re-entrancy guard before C's own acquisition stats anything
+                with mock.patch.object(aaos.os, "stat", real_stat):
+                    state["c"] = aaos._try_acquire_drain_lock(PROJECT, root=str(self.root))
+                state["c_bytes"] = self.lock_path.read_bytes()
+
+        real_read_text = Path.read_text
+        calls = {"n": 0}
+
+        def deny_first_lock_read(path_self, *args, **kwargs):
+            if Path(path_self) == self.lock_path:
+                calls["n"] += 1
+                if calls["n"] == 1:
+                    raise PermissionError(13, "simulated sharing violation")
+            return real_read_text(path_self, *args, **kwargs)
+
+        with mock.patch.object(Path, "read_text", deny_first_lock_read),                 mock.patch.object(aaos.os, "stat", a_releases_then_c_acquires):
+            held_by_b = aaos._try_acquire_drain_lock(PROJECT, root=str(self.root))
+
+        self.assertIsNotNone(state.get("c"), "fixture sanity: C must win the vacated lock")
+        self.assertIsNone(held_by_b, "B acquired the drain lock while C holds it")
+        self.assertEqual(self._archived_locks(), [], "C's live lock was archived")
+        self.assertEqual(self.lock_path.read_bytes(), state["c_bytes"])
+
+    def test_lock_neither_readable_nor_statable_fails_closed_and_says_so(self):
+        held = aaos._try_acquire_drain_lock(PROJECT, root=str(self.root))
+        self.assertIsNotNone(held)
+        real_stat = os.stat
+
+        def deny_lock_stat(path, *args, **kwargs):
+            if str(path) == str(self.lock_path):
+                raise PermissionError(13, "simulated stat failure")
+            return real_stat(path, *args, **kwargs)
+
+        stderr = io.StringIO()
+        with self._deny_lock_reads(), mock.patch.object(aaos.os, "stat", deny_lock_stat),                 contextlib.redirect_stderr(stderr):
+            second = aaos._try_acquire_drain_lock(PROJECT, root=str(self.root))
+
+        self.assertIsNone(second, "a lock whose age is unknowable was stolen")
+        self.assertEqual(self._archived_locks(), [])
+        self.assertIn("neither read nor stat", stderr.getvalue(), "a skipped drain of this kind must not be silent")
+
+    def test_non_utf8_lock_content_is_stale_not_an_escaping_exception(self):
+        # Read-but-unparseable stays "stale" (unchanged contract): with
+        # _exclusive_publish no live lock can have partial content.
+        aaos._exclusive_publish(self.lock_path, bytes([0xFF, 0xFE]) + b" not utf-8 " + bytes([0xFF]))
+        second = aaos._try_acquire_drain_lock(PROJECT, root=str(self.root))
+        self.assertIsNotNone(second, "a corrupt lock wedged draining")
+        self.assertEqual(len(self._archived_locks()), 1, "corrupt lock must be archived, not deleted")
+
+    def test_pending_file_vanishing_under_a_held_lock_is_reported_loudly(self):
+        # A pending file disappearing while we hold the exclusive lock is
+        # the fingerprint of a second drainer. Never a silent skip.
+        def ev(i):
+            return {
+                "protocol_version": "1.0", "event_id": f"e-v-{i}", "type": "TaskCreated",
+                "actor": "claude-code", "timestamp": "2026-09-18T00:00:00+00:00",
+                "project_id": PROJECT, "refs": {"task": f"t-v-{i}"},
+            }
+
+        doomed = aaos.spool_event(ev(1), PROJECT, root=str(self.root))
+        aaos.spool_event(ev(2), PROJECT, root=str(self.root))
+        real_read_text = Path.read_text
+
+        def vanish(path_self, *args, **kwargs):
+            if Path(path_self) == doomed and doomed.exists():
+                doomed.unlink()
+            return real_read_text(path_self, *args, **kwargs)
+
+        stderr = io.StringIO()
+        with mock.patch.object(Path, "read_text", vanish), contextlib.redirect_stderr(stderr):
+            drained = aaos.drain_event_spool(PROJECT, root=str(self.root))
+
+        self.assertEqual(drained, 1, "the surviving pending file must still be folded")
+        self.assertIn("vanished while the drain lock was held", stderr.getvalue())
+        self.assertIn("e-v-2", aaos.events_log_path(PROJECT, root=str(self.root)).read_text(encoding="utf-8"))
 
 
 if __name__ == "__main__":

@@ -1012,11 +1012,19 @@ def _try_acquire_drain_lock(project_id, *, root: str | None = None, now: datetim
                 # Fail closed on a fresh lock, but keep the unwedge path for
                 # a crashed drainer's lock that STAYS unreadable: fall back
                 # to the file's own mtime, which is fresh for any live lock.
+                # mtime is a real filesystem time, so it is compared against
+                # the real clock -- never `resolved_now`, which a caller may
+                # have injected far from wall-clock.
                 try:
-                    lock_age = resolved_now.timestamp() - os.stat(lock_path).st_mtime
+                    lock_age = time.time() - os.stat(lock_path).st_mtime
                 except FileNotFoundError:
-                    continue
-                except OSError:
+                    continue  # released meanwhile: gone is not stale
+                except OSError as exc:
+                    print(
+                        f"WARNING: drain lock {lock_path} can be neither read nor stat'ed ({exc}); "
+                        "skipping this drain -- events stay pending until it clears",
+                        file=sys.stderr,
+                    )
                     return None
                 is_stale = lock_age > stale_after.total_seconds()
             if not is_stale:
