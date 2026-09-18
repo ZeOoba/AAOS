@@ -944,17 +944,32 @@ def _exclusive_publish(path: Path, data: bytes) -> None:
 
 
 def _read_drain_lock_acquired(lock_path: Path) -> datetime | None:
-    """Best-effort parse of a drain lock file's `acquired` field. None on
-    any read/parse failure -- callers treat that as stale. Safe to treat
-    as an immediate, non-retried fail-to-stale here (unlike an earlier
-    version of this function): _try_acquire_drain_lock publishes the lock
-    via _exclusive_publish, which guarantees the file is never visible
-    under its real name with partial content, so an unparseable read here
-    means a genuinely corrupt/abandoned lock, not a legitimate in-flight
-    write."""
+    """Parse a drain lock file's `acquired` field.
+
+    Returns None ONLY when the lock's content was read and is unparseable
+    -- callers treat that as stale, which is safe because
+    _try_acquire_drain_lock publishes via _exclusive_publish: the file is
+    never visible under its real name with partial content, so unparseable
+    content is a genuinely corrupt/abandoned lock, not an in-flight write.
+
+    Raises OSError when the lock could not be read at all. That is NOT
+    evidence of staleness and must never be folded into the None/"stale"
+    answer (OI-270): FileNotFoundError means the holder released between
+    the caller's failed exclusive create and this read -- the single most
+    routine event under contention -- and any other OSError (Windows
+    sharing violation / delete-pending while the holder unlinks) means the
+    lock's age is simply unknown. An earlier version returned None for
+    both; the caller then "archived the stale lock" with a path-based
+    os.replace that moved whatever was at the path by then -- a third
+    drainer's LIVE lock -- and acquired too. Two drainers folding the
+    NDJSON from the same snapshot is the lost-event race this whole
+    mechanism exists to prevent."""
     try:
-        data = json.loads(lock_path.read_text(encoding="utf-8"))
-        return _parse_iso_dt(data.get("acquired"))
+        raw = lock_path.read_text(encoding="utf-8")
+    except UnicodeDecodeError:
+        return None
+    try:
+        return _parse_iso_dt(json.loads(raw).get("acquired"))
     except Exception:
         return None
 
@@ -968,7 +983,8 @@ def _try_acquire_drain_lock(project_id, *, root: str | None = None, now: datetim
     A lock whose `acquired` timestamp is stale (>_DRAIN_LOCK_STALE_MINUTES
     old, or unparseable) is presumed abandoned by a crashed drainer: it is
     archived (os.replace, never deleted -- never-delete doctrine) and
-    acquisition is retried once."""
+    acquisition is retried once. A lock that is missing or unreadable by
+    the time it is inspected is NOT stale -- see _read_drain_lock_acquired."""
     resolved_now = _now(now)
     lock_path = _drain_lock_path(project_id, root=root)
     content = json.dumps(
@@ -982,11 +998,27 @@ def _try_acquire_drain_lock(project_id, *, root: str | None = None, now: datetim
             _exclusive_publish(lock_path, content)
             return lock_path
         except FileExistsError:
-            acquired_at = _read_drain_lock_acquired(lock_path)
-            is_stale = (
-                acquired_at is None
-                or resolved_now - acquired_at > timedelta(minutes=_DRAIN_LOCK_STALE_MINUTES)
-            )
+            stale_after = timedelta(minutes=_DRAIN_LOCK_STALE_MINUTES)
+            try:
+                acquired_at = _read_drain_lock_acquired(lock_path)
+                is_stale = acquired_at is None or resolved_now - acquired_at > stale_after
+            except FileNotFoundError:
+                # Released between our create attempt and our read. Gone is
+                # not stale: there is nothing to archive -- just compete for
+                # the now-free lock on the next attempt (OI-270).
+                continue
+            except OSError:
+                # Exists but unreadable, so its content can't be judged.
+                # Fail closed on a fresh lock, but keep the unwedge path for
+                # a crashed drainer's lock that STAYS unreadable: fall back
+                # to the file's own mtime, which is fresh for any live lock.
+                try:
+                    lock_age = resolved_now.timestamp() - os.stat(lock_path).st_mtime
+                except FileNotFoundError:
+                    continue
+                except OSError:
+                    return None
+                is_stale = lock_age > stale_after.total_seconds()
             if not is_stale:
                 return None  # a live drainer is active -- never steal, never block
 
@@ -1105,15 +1137,19 @@ def drain_event_spool(project_id, *, root: str | None = None, now: datetime | No
             try:
                 raw = p.read_text(encoding="utf-8")
             except FileNotFoundError:
-                # Listed a moment ago but gone by the time we got here.
-                # We hold the exclusive drain lock, so nothing else should
-                # legitimately be removing pending files out from under
-                # us -- but this has been observed transiently under very
-                # high write concurrency (directory-listing/rename timing
-                # on Windows). Whatever removed it did so through this
-                # same module's own machinery, so the underlying event is
-                # not at risk; just skip it rather than misreport a
-                # perfectly fine file as "malformed."
+                # Listed a moment ago, gone now. We hold the exclusive drain
+                # lock, so nothing should be moving pending files out from
+                # under us: this is the signature of a SECOND drainer, which
+                # is how OI-270 lost events (the other drainer folds this
+                # file, then one fold's os.replace clobbers the other's
+                # lines). Nothing here can be folded, so skip it -- but
+                # loudly, never as the benign timing quirk an earlier
+                # comment here took it for.
+                print(
+                    f"WARNING: pending event file {name} vanished while the drain lock was held -- "
+                    "another drainer is active despite the lock; verify its event reached the NDJSON",
+                    file=sys.stderr,
+                )
                 continue
             except OSError as exc:
                 os.makedirs(corrupt_dir, exist_ok=True)

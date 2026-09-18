@@ -242,6 +242,28 @@ class DrainLockMutualExclusionTests(unittest.TestCase):
         self.assertEqual(self._archived_locks(), [])
         self.assertEqual(self.lock_path.read_bytes(), held_bytes)
 
+    def test_lock_that_stays_unreadable_is_still_reclaimed_by_age(self):
+        # Failing closed on an unreadable lock must not become a permanent
+        # wedge: a crashed drainer's lock that STAYS unreadable is judged by
+        # the file's own mtime instead, and reclaimed once that is stale.
+        held = aaos._try_acquire_drain_lock(PROJECT, root=str(self.root))
+        self.assertIsNotNone(held)
+        long_ago = self.lock_path.stat().st_mtime - 60 * (aaos._DRAIN_LOCK_STALE_MINUTES + 5)
+        os.utime(self.lock_path, (long_ago, long_ago))
+
+        real_read_text = Path.read_text
+
+        def deny_lock_reads(path_self, *args, **kwargs):
+            if Path(path_self) == self.lock_path:
+                raise PermissionError(13, "simulated persistent unreadability")
+            return real_read_text(path_self, *args, **kwargs)
+
+        with mock.patch.object(Path, "read_text", deny_lock_reads):
+            second = aaos._try_acquire_drain_lock(PROJECT, root=str(self.root))
+
+        self.assertIsNotNone(second, "an aged unreadable lock wedged draining forever")
+        self.assertEqual(len(self._archived_locks()), 1, "stale lock must be archived, not deleted")
+
 
 if __name__ == "__main__":
     unittest.main()
