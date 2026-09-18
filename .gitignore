@@ -14,3 +14,10 @@ Thumbs.db
 *.env.*
 *credentials*
 *.tmp
+
+# Git worktree admin dirs (EnterWorktree / git worktree add convention) -- never committed.
+# Matches oxford-command-center / ora-skills / ora-claude-config. Without this rule the
+# worktree copies were ripgrep-visible (a README search returned 4 duplicate hits out of 5)
+# and `git status` carried a permanent `?? .claude/`, which the shared-checkout protocol
+# reads as another session's unlanded work.
+.claude/worktrees/
