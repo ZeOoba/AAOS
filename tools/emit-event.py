@@ -80,9 +80,9 @@ def build_arg_parser() -> argparse.ArgumentParser:
 
 def main(argv=None) -> int:
     args = build_arg_parser().parse_args(argv)
-    resolved_now = _resolve_now(args.now)
 
     try:
+        resolved_now = _resolve_now(args.now)
         aaos.require_seam_reachable(args.seam_root)
         if args.drain_only:
             n = aaos.drain_event_spool(args.project, root=args.seam_root, now=resolved_now)
@@ -126,6 +126,8 @@ def main(argv=None) -> int:
     except aaos.EventCommitError as exc:
         print(f"EVENT COMMIT FAILURE: {exc}", file=sys.stderr)
         return 5
+    except Exception as exc:
+        return aaos.unexpected_error_exit(exc)
 
 
 if __name__ == "__main__":

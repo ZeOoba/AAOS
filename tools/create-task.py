@@ -34,13 +34,12 @@ Exit codes: see docs/PHASE3-DESIGN.md section 0.4.
 from __future__ import annotations
 
 import argparse
-import re
 import sys
 from datetime import datetime, timezone
 
 import _aaos_common as aaos
 
-TASK_ID_RE = re.compile(r"^t-[a-z0-9-]+$")
+TASK_ID_RE = aaos.TASK_ID_RE  # single home: _aaos_common (also enforced by the path builders)
 
 
 def _add_common_args(parser: argparse.ArgumentParser) -> None:
@@ -102,16 +101,16 @@ def _build_task_id(args, now) -> str:
         raw = f"t-{args.slug.strip().lower()}"
     if args.suffix_timestamp:
         raw = f"{raw}-{now.astimezone(timezone.utc).strftime('%Y%m%d%H%M%S')}"
-    if not TASK_ID_RE.match(raw):
+    if not TASK_ID_RE.fullmatch(raw):
         raise aaos.UsageError(f"invalid task id {raw!r}: must match {TASK_ID_RE.pattern!r}")
     return raw
 
 
 def main(argv=None) -> int:
     args = build_arg_parser().parse_args(argv)
-    resolved_now = _resolve_now(args.now)
 
     try:
+        resolved_now = _resolve_now(args.now)
         aaos.require_seam_reachable(args.seam_root)
         task_id = _build_task_id(args, resolved_now)
 
@@ -183,6 +182,8 @@ def main(argv=None) -> int:
     except aaos.EventCommitError as exc:
         print(f"EVENT COMMIT FAILURE: {exc}", file=sys.stderr)
         return 5
+    except Exception as exc:
+        return aaos.unexpected_error_exit(exc)
 
 
 if __name__ == "__main__":

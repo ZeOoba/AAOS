@@ -18,9 +18,13 @@ Validates BEFORE writing (mandatory): validate_obj(handoff, "handoff")
 runs the schema check + protocol_version check + write_scope colonization
 guard; any error -> exit 1, write nothing. save_handoff is write-once
 (identical re-post = no-op, no re-emit; different content same id = exit
-3). Non-empty --blocker -> load the task, assert_lease_held if
---holder/--session given, set state="blocked" + blocked_reason, emit
-Blocked in addition to HandoffPosted.
+3). Non-empty --blocker -> REQUIRES --holder and --session (exit 2
+otherwise); the task must be leased or in-progress (exit 3 otherwise) and
+assert_lease_held must pass (exit 4 otherwise). All three checks run
+before the handoff or any event is written, so a rejected caller writes
+nothing. Then set state="blocked" + blocked_reason (lease dropped), emit
+Blocked in addition to HandoffPosted. An identical re-post against a task
+already blocked with the same reason is an idempotent no-op.
 
 Registry note: this script always validates against the REAL repo-root
 agent-registry.json -- aaos.validate_obj("handoff", registry=None) loads
@@ -34,9 +38,10 @@ per the literal CLI spec in PHASE3-DESIGN.md section 2.5.
 Exit codes: see docs/PHASE3-DESIGN.md section 0.4.
     0 success (including idempotent no-op)
     1 validation/write-scope failure (nothing written)
-    2 usage error (artifact missing on disk, --summary-file missing)
-    3 write-once conflict
-    4 lease lost (only when --holder/--session given with a blocker)
+    2 usage error (artifact missing on disk, --summary-file missing,
+      --blocker without --holder/--session, invalid task/handoff id)
+    3 write-once conflict; --blocker on a task not leased/in-progress
+    4 lease lost (--blocker by a caller that does not hold the lease)
     5 event-commit failure
 """
 from __future__ import annotations
@@ -123,10 +128,15 @@ def _hash_artifact(path_str: str) -> dict:
 
 def main(argv=None) -> int:
     args = build_arg_parser().parse_args(argv)
-    resolved_now = _resolve_now(args.now)
 
     try:
+        resolved_now = _resolve_now(args.now)
         aaos.require_seam_reachable(args.seam_root)
+        if args.blocker and not (args.holder and args.session):
+            raise aaos.UsageError(
+                "--blocker requires --holder and --session: only the current lease "
+                "holder may block a task"
+            )
         summary = args.summary
         if summary is None and args.summary_file:
             summary_path = Path(args.summary_file)
@@ -172,24 +182,24 @@ def main(argv=None) -> int:
         existing = aaos.load_handoff(args.id, args.project, root=args.seam_root)
         is_noop = existing is not None and existing == handoff
 
-        if not is_noop:
-            aaos.save_handoff(handoff, root=args.seam_root)
-            event_id = aaos.emit_event(
-                type="HandoffPosted", actor=args.from_agent, project_id=args.project,
-                refs={"task": args.task_ref, "handoff": args.id},
-                now=resolved_now, root=args.seam_root,
-            )
-            print(f"POSTED: {args.id} (event {event_id})")
-        else:
-            print(f"IDEMPOTENT NO-OP: {args.id} already posted with identical content")
-
+        # F01: every --blocker precondition (task state, lease ownership,
+        # resulting task schema) is checked BEFORE the handoff file or any
+        # event is written, so a rejected caller leaves no trace.
+        new_task = None
         if args.blocker:
             task = aaos.load_task(args.task_ref, args.project, root=args.seam_root)
-            if args.holder and args.session:
+            blocked_reason = "; ".join(args.blocker)
+            already_blocked = (
+                task.get("state") == "blocked" and task.get("blocked_reason") == blocked_reason
+            )
+            if not (is_noop and already_blocked):  # else: identical re-run, nothing to do
+                if task.get("state") not in ("leased", "in-progress"):
+                    raise aaos.StateConflictError(
+                        f"cannot block task {args.task_ref}: state={task.get('state')!r} "
+                        "(only a leased or in-progress task can be blocked)"
+                    )
                 aaos.assert_lease_held(task, args.holder, args.session, now=resolved_now)
 
-            blocked_reason = "; ".join(args.blocker)
-            if task.get("state") != "blocked" or task.get("blocked_reason") != blocked_reason:
                 new_task = dict(task)
                 new_task["state"] = "blocked"
                 new_task["blocked_reason"] = blocked_reason
@@ -206,20 +216,30 @@ def main(argv=None) -> int:
                 if errors:
                     raise aaos.CorruptStateError(f"blocked task failed schema validation: {errors}")
 
-                blocked_event_id = aaos.commit_state_change(
-                    new_task, aaos.task_path(args.task_ref, args.project, root=args.seam_root),
-                    {
-                        "type": "Blocked", "actor": args.from_agent, "project_id": args.project,
-                        "refs": {"task": args.task_ref, "handoff": args.id}, "now": resolved_now,
-                    },
-                    root=args.seam_root,
-                )
+        if not is_noop:
+            aaos.save_handoff(handoff, root=args.seam_root)
+            event_id = aaos.emit_event(
+                type="HandoffPosted", actor=args.from_agent, project_id=args.project,
+                refs={"task": args.task_ref, "handoff": args.id},
+                now=resolved_now, root=args.seam_root,
+            )
+            print(f"POSTED: {args.id} (event {event_id})")
+        else:
+            print(f"IDEMPOTENT NO-OP: {args.id} already posted with identical content")
 
-                lock_file = aaos.lock_path(args.task_ref, args.project, root=args.seam_root)
-                if lock_file.exists():
-                    aaos.archive_lock(lock_file, now=resolved_now)
-
-                print(f"BLOCKED: {args.task_ref} (event {blocked_event_id})")
+        if new_task is not None:
+            blocked_event_id = aaos.commit_state_change(
+                new_task, aaos.task_path(args.task_ref, args.project, root=args.seam_root),
+                {
+                    "type": "Blocked", "actor": args.from_agent, "project_id": args.project,
+                    "refs": {"task": args.task_ref, "handoff": args.id}, "now": resolved_now,
+                },
+                root=args.seam_root,
+            )
+            aaos.archive_lock_after_commit(
+                aaos.lock_path(args.task_ref, args.project, root=args.seam_root), now=resolved_now
+            )
+            print(f"BLOCKED: {args.task_ref} (event {blocked_event_id})")
 
         return 0
 
@@ -238,6 +258,8 @@ def main(argv=None) -> int:
     except aaos.EventCommitError as exc:
         print(f"EVENT COMMIT FAILURE: {exc}", file=sys.stderr)
         return 5
+    except Exception as exc:
+        return aaos.unexpected_error_exit(exc)
 
 
 if __name__ == "__main__":

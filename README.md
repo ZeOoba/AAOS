@@ -2,7 +2,7 @@
 
 ## 1. What this actually is
 
-AAOS is a **filesystem-based task queue and handoff protocol** that lets two Claude surfaces — a local Claude Code CLI session and a cloud Claude Cowork session — coordinate work at Oxford Realty Advisors without a server, message bus, or database. There is no running process, no daemon, and no network listener anywhere in this repo: "coordination" happens entirely through JSON files (tasks, handoffs, locks, an append-only event log) written to a shared OneDrive-synced folder (`Claude_Workspace\AAOS\`, referred to in the code/docs as "the seam"), plus a set of Python CLI scripts that read and atomically rewrite those files under a lease/lock discipline. Git (this repo, `C:\Users\Owner\AAOS\`) holds only the source of truth for the *contracts* — five JSON Schemas, a static two-entry agent registry, docs, templates, examples, tests, CI config, and the tooling itself — deliberately kept outside OneDrive to avoid `.git`-in-a-synced-folder corruption risk. A separate `publish-contracts.py` script copies (mirrors) those contracts into the seam so a Cowork session without git access can still read them. So: this is not a multi-agent runtime, an orchestrator, or a network protocol — it is a small, disciplined **shared-file locking/queueing library** (atomic write-rename, exclusive-create locks, lease TTLs, fail-closed conflict handling) wrapped in 13 single-purpose CLI scripts, with 241 unit/integration tests (`python -m unittest discover -s tests -p "test_*.py"`; all 241 passed locally on 2026-10-03, and the suite runs in GitHub Actions CI on Python 3.11 and 3.13) and an unusually extensive documentation/design-review trail (4 gate review records plus the Phase 1 design review and capability map covering gates 0-5, and 6 ADRs) for a codebase of this size. Docs describe v1.0 as feature-complete against its own deliverables manifest. The one item that manifest lists as open at v1.0 (a live round-trip showing a real Cowork session can read/write the seam) has since been evidenced in the live seam: a handoff authored by `cowork` (`h-cowork-seam-ack-e7c490`, posted 2026-07-10) answers `t-cowork-seam-confirm`, and that task was leased, completed and archived by `claude-code` on 2026-08-16. Cowork's side remains a carefully-written bootstrap runbook (`docs/COWORK-BOOTSTRAP.md`); nothing in this repo invokes Cowork automatically.
+AAOS is a **filesystem-based task queue and handoff protocol** that lets two Claude surfaces — a local Claude Code CLI session and a cloud Claude Cowork session — coordinate work at Oxford Realty Advisors without a server, message bus, or database. There is no running process, no daemon, and no network listener anywhere in this repo: "coordination" happens entirely through JSON files (tasks, handoffs, locks, an append-only event log) written to a shared OneDrive-synced folder (`Claude_Workspace\AAOS\`, referred to in the code/docs as "the seam"), plus a set of Python CLI scripts that read and atomically rewrite those files under a lease/lock discipline. Git (this repo, `C:\Users\Owner\AAOS\`) holds only the source of truth for the *contracts* — five JSON Schemas, a static two-entry agent registry, docs, templates, examples, tests, CI config, and the tooling itself — deliberately kept outside OneDrive to avoid `.git`-in-a-synced-folder corruption risk. A separate `publish-contracts.py` script copies (mirrors) those contracts into the seam so a Cowork session without git access can still read them. So: this is not a multi-agent runtime, an orchestrator, or a network protocol — it is a small, disciplined **shared-file locking/queueing library** (atomic write-rename, exclusive-create locks, lease TTLs, fail-closed conflict handling) wrapped in 13 single-purpose CLI scripts, with 267 unit/integration tests (`python -m unittest discover -s tests -p "test_*.py"`; all 267 passed locally on 2026-10-03, and the suite runs in GitHub Actions CI on Python 3.11 and 3.13) and an unusually extensive documentation/design-review trail (4 gate review records plus the Phase 1 design review and capability map covering gates 0-5, and 6 ADRs) for a codebase of this size. Docs describe v1.0 as feature-complete against its own deliverables manifest. The one item that manifest lists as open at v1.0 (a live round-trip showing a real Cowork session can read/write the seam) has since been evidenced in the live seam: a handoff authored by `cowork` (`h-cowork-seam-ack-e7c490`, posted 2026-07-10) answers `t-cowork-seam-confirm`, and that task was leased, completed and archived by `claude-code` on 2026-08-16. Cowork's side remains a carefully-written bootstrap runbook (`docs/COWORK-BOOTSTRAP.md`); nothing in this repo invokes Cowork automatically.
 
 ## 2. Architecture / data flow
 
@@ -10,7 +10,7 @@ AAOS is a **filesystem-based task queue and handoff protocol** that lets two Cla
 flowchart TB
     subgraph GIT["Git repo (this repo) — C:/Users/Owner/AAOS — Source of Truth for CODE + CONTRACTS"]
         SCHEMAS["schemas/*.schema.json (5)\nagent-registry.json (2 entries)\ndocs/, templates/, examples/, ADRs (6)\nrequirements.txt, .github/workflows/ci.yml"]
-        TESTS["tests/ (241 unittest cases)\nrun by CI: ubuntu-latest, Python 3.11 + 3.13\n(per-test tmpdir seams, never the live seam)"]
+        TESTS["tests/ (267 unittest cases)\nrun by CI: ubuntu-latest, Python 3.11 + 3.13\n(per-test tmpdir seams, never the live seam)"]
     TOOLS["tools/*.py CLI scripts\n(create/lease/complete/fail-task,\npost-handoff, expire-leases,\nemit-event, validate,\nderive-heartbeat, project-notion,\npublish-contracts, publish-notion,\ncheck-contract-drift)\n+ tools/_aaos_common.py shared library"]
     end
     TESTS -. "exercises" .-> TOOLS
@@ -111,12 +111,13 @@ AAOS/
 │   └── check-contract-drift.py  read-only guard: has the seam mirror drifted from the git tree?
 ├── requirements.txt        dependency floor: jsonschema>=4.18
 ├── .github/workflows/ci.yml  GitHub Actions: runs the suite on push/PR to main (Python 3.11, 3.13)
-├── tests/                  241 tests (unittest), all passing locally on 2026-10-03
+├── tests/                  267 tests (unittest), all passing locally on 2026-10-03
 │   ├── _tool_loader.py         shared helper for importing hyphenated tools/*.py files in tests
 │   ├── test_aaos_common.py, test_queue_scripts.py, test_e2e_lifecycle.py,
 │   │   test_event_log_concurrency.py, test_failure_injection_matrix.py (17 tests),
 │   │   test_check_contract_drift.py, test_derive_heartbeat.py, test_project_notion.py,
-│   │   test_publish_contracts.py, test_publish_notion.py, test_validate.py
+│   │   test_publish_contracts.py, test_publish_notion.py, test_validate.py,
+│   │   test_lifecycle_hardening.py
 │   └── fixtures/
 ├── templates/              5 fill-in-the-blank templates (task, handoff JSON; ADR, gate-review,
 │                            BUILD-STATE markdown) used when authoring new instances by hand.
@@ -156,14 +157,14 @@ There is no build step, package, or installed CLI entry point — every script i
 ```
 python -m unittest discover -s tests -p "test_*.py"
 ```
-(241 tests, all green on 2026-10-03; ~48 seconds locally. The same command runs in `.github/workflows/ci.yml`.)
+(267 tests, all green on 2026-10-03; ~48 seconds locally. The same command runs in `.github/workflows/ci.yml`.)
 
 **Validate a state file against its schema:**
 ```
 python tools/validate.py <path-to-json-file> [--schema-dir <dir>] [--schema <name>] [--registry <path>]
 ```
 
-**Drive the queue end to end** (each command's exit codes are documented in that script's own docstring, e.g. 0=success, 2=usage error, 3=state conflict/DENIED, 4=lease lost/CONTESTED, 5=event-commit failure):
+**Drive the queue end to end** (each command's exit codes are documented in that script's own docstring, e.g. 0=success, 1=validation/corrupt state/unexpected error (never a raw traceback), 2=usage error (incl. an invalid task/handoff id), 3=state conflict/DENIED, 4=lease lost/CONTESTED, 5=event-commit failure):
 ```
 python tools/create-task.py --title "<str>" --accept "<str>" (--id t-<slug> | --slug <slug>) [--owner <agent>] [--priority {1,2,3}]
 python tools/lease-task.py <task-id> --holder <agent> --session <str> [--ttl-min 45] [--skew-min 5] [--settle-sec 30]
@@ -223,5 +224,5 @@ Requires `NOTION_TOKEN` in the environment unless `--dry-run`; POSTs a dated chi
 - **A Cowork session in `SAFE-BY-HAND` mode must never edit an existing shared file, ever** — including `_seam-probe.md`, which the bootstrap doc notes literally contains a stale, superseded instruction telling the reader to "append a confirmation line" to it; the bootstrap explicitly overrides that embedded instruction rather than following it.
 - **`emit-event.py` is deliberately non-idempotent** — every invocation mints a new event; the code comments warn future maintainers not to "fix" this into a dedup primitive, since deduplication of logically-repeated events is the calling script's job, not the event layer's.
 - **Line endings are normalized by `.gitattributes` (`* text=auto`).** A diff can still look larger than expected on a checkout made before that file landed.
-- **The headline "v1.0 shipped" claim is self-graded.** `docs/DELIVERABLES-MANIFEST.md` states plainly that none of the six phase gates received explicit human (Gabriel) sign-off before the next phase began — each was presented and the project proceeded on the next message, a fact it flags consistently rather than treating as approval. Treat "v1.0 complete" as the project's own thorough self-assessment (241 tests green today, 173 at v1.0 per the manifest; 6 documented adversarial gate reviews, all findings independently re-verified), not as an externally ratified release.
+- **The headline "v1.0 shipped" claim is self-graded.** `docs/DELIVERABLES-MANIFEST.md` states plainly that none of the six phase gates received explicit human (Gabriel) sign-off before the next phase began — each was presented and the project proceeded on the next message, a fact it flags consistently rather than treating as approval. Treat "v1.0 complete" as the project's own thorough self-assessment (267 tests green today, 173 at v1.0 per the manifest; 6 documented adversarial gate reviews, all findings independently re-verified), not as an externally ratified release.
 - **Seam-confirmation gap closed, with a caveat:** `docs/DELIVERABLES-MANIFEST.md` still lists the live Cowork round-trip as a standing open item (it was written at v1.0). The live seam since shows a `cowork`-authored return handoff (2026-07-10) and `t-cowork-seam-confirm` archived (2026-08-16). Still queued in the live seam: `t-cowork-jsonschema-pin-952743` (Cowork's request about the jsonschema pin; `requirements.txt` now declares the floor).

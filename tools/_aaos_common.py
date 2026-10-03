@@ -57,6 +57,11 @@ SCHEMA_DIR = REPO_ROOT / "schemas"
 DEFAULT_SEAM_ROOT = r"C:/Users/Owner/OneDrive - Oxford Capital Partners/Claude_Workspace/AAOS"
 
 PROJECT_ID_RE = re.compile(r"^[a-z][a-z0-9-]*$")
+# Mirror schemas/task.schema.json and handoff.schema.json "id" patterns. Used
+# by the path builders below (fullmatch, so a trailing newline can't slip
+# past "$") -- a raw CLI argument such as "../x" must never become a path.
+TASK_ID_RE = re.compile(r"t-[a-z0-9-]+")
+HANDOFF_ID_RE = re.compile(r"h-[a-z0-9-]+")
 
 
 # ---------------------------------------------------------------------------
@@ -176,6 +181,23 @@ def _validate_project_id(project_id: str) -> str:
     return project_id
 
 
+def _validate_id(value, pattern: re.Pattern, kind: str) -> str:
+    if not isinstance(value, str) or not pattern.fullmatch(value):
+        raise UsageError(
+            f"invalid {kind}: {value!r} (must match {pattern.pattern!r}) -- "
+            "refusing to construct a path that could escape the seam"
+        )
+    return value
+
+
+def _validate_task_id(task_id) -> str:
+    return _validate_id(task_id, TASK_ID_RE, "task id")
+
+
+def _validate_handoff_id(handoff_id) -> str:
+    return _validate_id(handoff_id, HANDOFF_ID_RE, "handoff id")
+
+
 def seam_root(override: str | None = None) -> Path:
     if override:
         return Path(override)
@@ -220,14 +242,17 @@ def project_dir(project_id: str, *, root: str | None = None) -> Path:
 
 
 def task_path(task_id, project_id, *, root: str | None = None) -> Path:
+    _validate_task_id(task_id)
     return project_dir(project_id, root=root) / "tasks" / f"{task_id}.json"
 
 
 def handoff_path(handoff_id, project_id, *, root: str | None = None) -> Path:
+    _validate_handoff_id(handoff_id)
     return project_dir(project_id, root=root) / "handoffs" / f"{handoff_id}.json"
 
 
 def lock_path(task_id, project_id, *, root: str | None = None) -> Path:
+    _validate_task_id(task_id)
     return project_dir(project_id, root=root) / "locks" / f"{task_id}.lock"
 
 
@@ -304,9 +329,15 @@ def load_json(path: Path | str) -> dict:
     except OSError as exc:
         raise UsageError(f"could not read {path}: {exc}") from exc
     try:
-        return json.loads(raw)
+        obj = json.loads(raw)
     except json.JSONDecodeError as exc:
         raise CorruptStateError(f"unparseable JSON at {path}: {exc}") from exc
+    # Every AAOS state file (task, handoff, lock, heartbeat) is a JSON object;
+    # callers immediately .get() on it. A list/scalar is corrupt state, not a
+    # reason for an AttributeError traceback.
+    if not isinstance(obj, dict):
+        raise CorruptStateError(f"JSON at {path} is not an object (got {type(obj).__name__})")
+    return obj
 
 
 def save_json(path: Path | str, obj: dict) -> None:
@@ -477,6 +508,88 @@ def archive_lock(lock_file: Path | str, *, now: datetime | None = None) -> Path:
         target = archive_dir / f"{base}.{compact_ts}.{os.getpid()}.lock"
     os.replace(str(lock_file), str(target))
     return target
+
+
+def archive_lock_if_unchanged(lock_file: Path | str, expected: dict, *, now: datetime | None = None) -> Path | None:
+    """Archive `lock_file` only if its content still equals `expected`.
+
+    For callers that read a lock, decided something about it, and now want to
+    move it aside: the path may meanwhile hold a DIFFERENT lock (e.g. a
+    lease-task that reclaimed the expired one and published its own), and a
+    path-based archive_lock would then archive that live lock. Returns the
+    archive path, or None if the lock is gone, no longer matches, or could
+    not be moved (warned on stderr; never raises OSError, so it is safe in
+    cleanup paths that must re-raise the original failure).
+
+    Not a compare-and-swap -- a residual window remains between the re-read
+    and the os.replace. It is mitigated, not closed: if the archived file's
+    content is not `expected`, it is put back exclusively (os.link; on
+    Windows, os.rename as the no-hardlink fallback -- neither ever clobbers
+    a newer lock) and None is returned. If even that fails (a third lock
+    now occupies the path, or no non-clobbering move exists), an Escalated
+    event (detail "LockRestoreFailed") is emitted best-effort so a human
+    can restore the archived lock by hand."""
+    lock_file = Path(lock_file)
+    try:
+        current = load_json(lock_file)
+    except (UsageError, CorruptStateError):
+        return None  # gone or unreadable: nothing of ours to archive
+    if current != expected:
+        return None
+    try:
+        target = archive_lock(lock_file, now=now)
+    except FileNotFoundError:
+        return None
+    except OSError as exc:
+        print(f"WARNING: could not archive lock {lock_file}: {exc}", file=sys.stderr)
+        return None
+    try:
+        archived = load_json(target)
+    except AaosError:
+        archived = None
+    if archived != expected:
+        # Raced: we moved someone else's lock. Put it back without clobbering.
+        _restore_archived_lock(target, lock_file, now=now)
+        return None
+    return target
+
+
+def _restore_archived_lock(archived: Path, lock_file: Path, *, now: datetime | None = None) -> bool:
+    """Move `archived` back to `lock_file` without ever replacing a lock that
+    is there now. Returns True on success; on failure warns and emits a
+    best-effort Escalated event. Never raises."""
+    try:
+        try:
+            os.link(str(archived), str(lock_file))
+        except FileExistsError:
+            raise
+        except OSError:
+            if os.name != "nt":
+                raise  # POSIX rename clobbers: no safe fallback
+            os.rename(str(archived), str(lock_file))  # Windows rename refuses an existing dest
+        else:
+            try:
+                os.unlink(str(archived))  # second name of the restored file; no data lost
+            except OSError:
+                pass  # harmless: a duplicate name left in _archive
+        return True
+    except OSError as exc:
+        print(
+            f"WARNING: archived a lock that changed under us and could not restore it "
+            f"({archived} -> {lock_file}): {exc}",
+            file=sys.stderr,
+        )
+        try:
+            project_dir_ = lock_file.parent.parent
+            emit_event(
+                type="Escalated", actor="system", project_id=project_dir_.name,
+                refs={"lock": str(lock_file)},
+                detail=f"LockRestoreFailed: live lock left at {archived.name}"[:200],
+                now=now, root=str(project_dir_.parent.parent),
+            )
+        except Exception as emit_exc:  # best-effort: never mask the caller's own path
+            print(f"WARNING: could not emit LockRestoreFailed escalation: {emit_exc}", file=sys.stderr)
+        return False
 
 
 # ---------------------------------------------------------------------------
@@ -736,7 +849,10 @@ def acquire_lease(
                 incumbent_live = True  # fail-closed: don't steal an ambiguous incumbent
 
         if not incumbent_live:
-            archive_lock(final_lock_path, now=resolved_now)
+            try:
+                archive_lock(final_lock_path, now=resolved_now)
+            except FileNotFoundError:
+                pass  # already moved aside (e.g. expire-leases orphan sweep): just retry the link
             try:
                 _exclusive_link(sidecar, final_lock_path, content_bytes)
                 _cleanup_sidecar()
@@ -751,11 +867,18 @@ def acquire_lease(
             _cleanup_sidecar()
             return LeaseResult(outcome=LeaseOutcome.DENIED, reason="incumbent lease live")
 
-    # ---- 4. Settle ----
-    sleep(settle_seconds)
+    # From here on the canonical lock is ours. If settle/rescan blows up,
+    # don't leave it behind: a queued task with a live lock is DENIED to
+    # everyone until it expires (F02).
+    try:
+        # ---- 4. Settle ----
+        sleep(settle_seconds)
 
-    # ---- 5. Rescan ----
-    conflict_paths = _scan_for_conflicts(final_lock_path.parent, task_id, holder, session)
+        # ---- 5. Rescan ----
+        conflict_paths = _scan_for_conflicts(final_lock_path.parent, task_id, holder, session)
+    except BaseException:
+        archive_lock_if_unchanged(final_lock_path, lock_dict, now=resolved_now)  # never raises OSError
+        raise
     if conflict_paths:
         if final_lock_path.exists():
             archive_lock(final_lock_path, now=resolved_now)
@@ -772,6 +895,30 @@ def acquire_lease(
         expires=expires_dt,
         reclaimed_prior=reclaimed_prior,
     )
+
+
+def unexpected_error_exit(exc: BaseException) -> int:
+    """Shared catch-all for the CLIs (mirrors expire-leases.py): anything that
+    is not an AaosError becomes a one-line message and exit 1, never a raw
+    traceback. Keeps every CLI inside the documented 0..5 exit contract."""
+    print(f"UNEXPECTED ERROR: {type(exc).__name__}: {exc}", file=sys.stderr)
+    return 1
+
+
+def archive_lock_after_commit(lock_file: Path | str, *, now: datetime | None = None) -> None:
+    """Post-commit lock release for complete/fail/post-handoff. The terminal
+    transition already committed; a lock that vanished (concurrent sweep) or
+    can't be moved is reported, not raised (mirrors expire-leases.py)."""
+    lock_file = Path(lock_file)
+    if not lock_file.exists():
+        return
+    try:
+        archive_lock(lock_file, now=now)
+    except OSError as exc:
+        print(
+            f"NOTE: lock {lock_file.name} already moved/removed or not archivable ({exc}); "
+            "state change already committed, continuing"
+        )
 
 
 # ---------------------------------------------------------------------------
