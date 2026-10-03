@@ -2,24 +2,26 @@
 
 ## 1. What this actually is
 
-AAOS is a **filesystem-based task queue and handoff protocol** that lets two Claude surfaces — a local Claude Code CLI session and a cloud Claude Cowork session — coordinate work at Oxford Realty Advisors without a server, message bus, or database. There is no running process, no daemon, and no network listener anywhere in this repo: "coordination" happens entirely through JSON files (tasks, handoffs, locks, an append-only event log) written to a shared OneDrive-synced folder (`Claude_Workspace\AAOS\`, referred to in the code/docs as "the seam"), plus a set of Python CLI scripts that read and atomically rewrite those files under a lease/lock discipline. Git (this repo, `C:\Users\Owner\AAOS\`) holds only the source of truth for the *contracts* — five JSON Schemas, a static two-entry agent registry, docs, and the tooling itself — deliberately kept outside OneDrive to avoid `.git`-in-a-synced-folder corruption risk. A separate `publish-contracts.py` script copies (mirrors) those contracts into the seam so a Cowork session without git access can still read them. So: this is not a multi-agent runtime, an orchestrator, or a network protocol — it is a small, disciplined **shared-file locking/queueing library** (atomic write-rename, exclusive-create locks, lease TTLs, fail-closed conflict handling) wrapped in ~13 single-purpose CLI scripts, with 232 unit/integration tests (`python -m unittest discover -s tests`, verified passing in this session) and an unusually extensive documentation/design-review trail (4 gate reviews, 6 ADRs) for a codebase of this size. Docs describe v1.0 as feature-complete against its own deliverables manifest, but one item — an actual live, same-session round-trip confirmation that a real Cowork session can read/write the seam — is explicitly still open (`t-cowork-seam-confirm.json` sits queued, unconsumed, in the live seam as of this writing), so "coordination layer" should be read as "queue + protocol that Code can drive end-to-end today; Cowork's side is a carefully-written bootstrap runbook (`docs/COWORK-BOOTSTRAP.md`) that has not yet been proven live."
+AAOS is a **filesystem-based task queue and handoff protocol** that lets two Claude surfaces — a local Claude Code CLI session and a cloud Claude Cowork session — coordinate work at Oxford Realty Advisors without a server, message bus, or database. There is no running process, no daemon, and no network listener anywhere in this repo: "coordination" happens entirely through JSON files (tasks, handoffs, locks, an append-only event log) written to a shared OneDrive-synced folder (`Claude_Workspace\AAOS\`, referred to in the code/docs as "the seam"), plus a set of Python CLI scripts that read and atomically rewrite those files under a lease/lock discipline. Git (this repo, `C:\Users\Owner\AAOS\`) holds only the source of truth for the *contracts* — five JSON Schemas, a static two-entry agent registry, docs, templates, examples, tests, CI config, and the tooling itself — deliberately kept outside OneDrive to avoid `.git`-in-a-synced-folder corruption risk. A separate `publish-contracts.py` script copies (mirrors) those contracts into the seam so a Cowork session without git access can still read them. So: this is not a multi-agent runtime, an orchestrator, or a network protocol — it is a small, disciplined **shared-file locking/queueing library** (atomic write-rename, exclusive-create locks, lease TTLs, fail-closed conflict handling) wrapped in 13 single-purpose CLI scripts, with 241 unit/integration tests (`python -m unittest discover -s tests -p "test_*.py"`; all 241 passed locally on 2026-10-03, and the suite runs in GitHub Actions CI on Python 3.11 and 3.13) and an unusually extensive documentation/design-review trail (4 gate review records plus the Phase 1 design review and capability map covering gates 0-5, and 6 ADRs) for a codebase of this size. Docs describe v1.0 as feature-complete against its own deliverables manifest. The one item that manifest lists as open at v1.0 (a live round-trip showing a real Cowork session can read/write the seam) has since been evidenced in the live seam: a handoff authored by `cowork` (`h-cowork-seam-ack-e7c490`, posted 2026-07-10) answers `t-cowork-seam-confirm`, and that task was leased, completed and archived by `claude-code` on 2026-08-16. Cowork's side remains a carefully-written bootstrap runbook (`docs/COWORK-BOOTSTRAP.md`); nothing in this repo invokes Cowork automatically.
 
 ## 2. Architecture / data flow
 
 ```mermaid
 flowchart TB
     subgraph GIT["Git repo (this repo) — C:/Users/Owner/AAOS — Source of Truth for CODE + CONTRACTS"]
-        SCHEMAS["schemas/*.schema.json (5)\nagent-registry.json (2 entries)\ndocs/, templates/, ADRs"]
-        TOOLS["tools/*.py CLI scripts\n(create/lease/complete/fail-task,\npost-handoff, expire-leases,\nemit-event, validate,\nderive-heartbeat, project-notion,\npublish-contracts, publish-notion,\ncheck-contract-drift)\n+ tools/_aaos_common.py shared library"]
+        SCHEMAS["schemas/*.schema.json (5)\nagent-registry.json (2 entries)\ndocs/, templates/, examples/, ADRs (6)\nrequirements.txt, .github/workflows/ci.yml"]
+        TESTS["tests/ (241 unittest cases)\nrun by CI: ubuntu-latest, Python 3.11 + 3.13\n(per-test tmpdir seams, never the live seam)"]
+    TOOLS["tools/*.py CLI scripts\n(create/lease/complete/fail-task,\npost-handoff, expire-leases,\nemit-event, validate,\nderive-heartbeat, project-notion,\npublish-contracts, publish-notion,\ncheck-contract-drift)\n+ tools/_aaos_common.py shared library"]
     end
+    TESTS -. "exercises" .-> TOOLS
 
     subgraph SEAM["Seam — OneDrive-synced folder, NO git — Claude_Workspace/AAOS/"]
         CONTRACTS["contracts/ (DERIVED read-only mirror,\npublished by publish-contracts.py)"]
         TASKS["projects/ora-ops/tasks/*.json\n(Source of Truth; single-writer via lease)"]
         LOCKS["projects/ora-ops/locks/*.lock\n(Ephemeral; exclusive-create + TTL)"]
         HANDOFFS["projects/ora-ops/handoffs/*.json\n(Source of Truth; write-once)"]
-        EVENTS["projects/ora-ops/events/aaos-events.ndjson\n(Source of Truth, append-only,\nsole writer: emit-event.py)\n+ .../ndjson.pending/ spool dir"]
-        HEARTBEAT["heartbeat.json (Derived projection;\nnot yet produced at the live seam —\nno scheduled caller feeds derive-heartbeat.py)"]
+        EVENTS["projects/ora-ops/events/aaos-events.ndjson\n(Source of Truth, append-only;\nwriters go through emit-event.py /\n_aaos_common spool + drain)\n+ .../ndjson.pending/ spool dir"]
+        HEARTBEAT["heartbeat.json (Derived projection;\nnot present at the live seam —\nno scheduled caller feeds derive-heartbeat.py)"]
         BUILDSTATE["state/BUILD-STATE.md (build continuity)"]
     end
 
@@ -54,9 +56,26 @@ flowchart TB
     EXPIRE["expire-leases.py\n(registered: ora-aaos-expire-leases,\nCC/MCP fleet, weekly Mon 07:20 ET)"] -- "sweeps + reclaims stale locks,\nresets task to queued,\nemits LeaseExpired/Escalated" --> LOCKS
     EXPIRE --> TASKS
 ```
-<!-- diagram-verified: 2026-09-18 -->
+<!-- diagram-verified: 2026-10-03 -->
 
-**Reading the diagram:** there is no coordinator process, no message broker, and no agent runtime loop — the flowchart is deliberately flat. "Coordination" is two independent CLI invocations (one per surface, at different times) reading and atomically rewriting the same small set of JSON files under a lease/lock discipline, plus a derived heartbeat/Notion-projection layer that is read-only and never itself a source of truth. The one genuinely live network call anywhere in this repo is `publish-notion.py`'s POST to the Notion API (stdlib `urllib`, no new dependency) — everything upstream of it, including `project-notion.py`'s payload build and `derive-heartbeat.py`'s projection, stays pure local-file computation, and a publish failure there is never treated as a queue failure. Two components have an external trigger, both on ORA's CC/MCP scheduler fleet rather than manual one-offs: `expire-leases.py` runs unattended as `ora-aaos-expire-leases` (weekly, Mondays 07:20 ET) and `publish-contracts.py` as `ora-aaos-publish-contracts`. The heartbeat/Notion-projection chain (`derive-heartbeat.py` → `project-notion.py` → `publish-notion.py`) is built and tested but has no scheduled caller: as of 2026-09-18 the live seam holds no `heartbeat.json`, `signals.json`, or `notion-projection.json`, so that half of the diagram shows the designed flow, not a running one.
+**Reading the diagram:** there is no coordinator process, no message broker, and no agent runtime loop — the flowchart is deliberately flat. "Coordination" is two independent CLI invocations (one per surface, at different times) reading and atomically rewriting the same small set of JSON files under a lease/lock discipline, plus a derived heartbeat/Notion-projection layer that is read-only and never itself a source of truth. The one genuinely live network call anywhere in this repo is `publish-notion.py`'s POST to the Notion API (stdlib `urllib`, no new dependency) — everything upstream of it, including `project-notion.py`'s payload build and `derive-heartbeat.py`'s projection, stays pure local-file computation, and a publish failure there is never treated as a queue failure. Two components have an external trigger, both on ORA's CC/MCP scheduler fleet rather than manual one-offs: `expire-leases.py` runs unattended as `ora-aaos-expire-leases` (weekly, Mondays 07:20 ET) and `publish-contracts.py` as `ora-aaos-publish-contracts`. The heartbeat/Notion-projection chain (`derive-heartbeat.py` → `project-notion.py` → `publish-notion.py`) is built and tested but has no scheduled caller: as of 2026-10-03 the live seam holds no `heartbeat.json`, `signals.json`, or `notion-projection.json`, so that half of the diagram shows the designed flow, not a running one.
+
+### Task lifecycle (state machine)
+
+States are the `state` enum in `schemas/task.schema.json`; each arrow is labelled with the script in `tools/` that performs it. `in-progress` is in the enum but reserved: every consumer accepts it alongside `leased`, and no script sets it. `blocked` and `failed` have no outgoing transition in the scripts shown here.
+
+```mermaid
+stateDiagram-v2
+    [*] --> queued: create-task.py
+    queued --> leased: lease-task.py (exclusive lock, TTL, settle rescan)
+    leased --> done: complete-task.py (evidence required)
+    leased --> failed: fail-task.py
+    leased --> blocked: post-handoff.py --blocker
+    leased --> queued: expire-leases.py (stale lock reclaimed)
+    done --> archived: complete-task.py --archive
+```
+
+Every transition commits its event (`TaskCreated`, `TaskLeased`, `Completed`, `Failed`, `Blocked`, `LeaseExpired`, `Archived`, ...) before the state file is renamed into place; the full event type enum is in `schemas/event.schema.json`.
 
 ## 3. Directory structure
 
@@ -90,10 +109,12 @@ AAOS/
 │   ├── publish-notion.py        POSTs project-notion.py's local payload to the Notion Ops Hub
 │   │                            (stdlib urllib, NOTION_TOKEN env var, --dry-run supported)
 │   └── check-contract-drift.py  read-only guard: has the seam mirror drifted from the git tree?
-├── tests/                  216 tests (unittest), all passing as of this review
+├── requirements.txt        dependency floor: jsonschema>=4.18
+├── .github/workflows/ci.yml  GitHub Actions: runs the suite on push/PR to main (Python 3.11, 3.13)
+├── tests/                  241 tests (unittest), all passing locally on 2026-10-03
 │   ├── _tool_loader.py         shared helper for importing hyphenated tools/*.py files in tests
 │   ├── test_aaos_common.py, test_queue_scripts.py, test_e2e_lifecycle.py,
-│   │   test_event_log_concurrency.py, test_failure_injection_matrix.py (10 adversarial scenarios),
+│   │   test_event_log_concurrency.py, test_failure_injection_matrix.py (17 tests),
 │   │   test_check_contract_drift.py, test_derive_heartbeat.py, test_project_notion.py,
 │   │   test_publish_contracts.py, test_publish_notion.py, test_validate.py
 │   └── fixtures/
@@ -114,26 +135,28 @@ AAOS/
 │   ├── PHASE1-DESIGN-REVIEW.md, PHASE3-DESIGN.md, PHASE4-DESIGN.md, PHASE5-DESIGN.md
 │   ├── GATE2-REVIEW.md … GATE5-REVIEW.md    adversarial design/code review records per phase
 │   ├── DELIVERABLES-MANIFEST.md self-graded checklist of the v1.0 build against its own spec
-│   ├── _task-reports/, adr/     5 ADRs (architecture selection, transport mechanics, locking
-│   │                            model, event-log relationship, heartbeat derivation)
+│   ├── _task-reports/, adr/     6 ADRs (architecture selection, transport mechanics, locking
+│   │                            model, event-log relationship, heartbeat derivation, lease ownership
+│   │                            authority) plus 0006-evidence-backstop-blind-spot.py, a demonstration
+│   │                            script for ADR-0006
 └── archive/                one retired script (_validate_all.py)
 ```
 
-There is no `requirements.txt`, `pyproject.toml`, or `setup.py` in the repo. The only non-stdlib import found anywhere in `tools/` is `jsonschema` (confirmed present in the active environment, version 4.26.0); the codebase otherwise relies solely on the Python 3 standard library (`argparse`, `json`, `pathlib`, `datetime`, `enum`, `hashlib`, `uuid`, `subprocess`, etc.). Verified running under Python 3.13.14.
+Dependencies are declared in `requirements.txt` (`jsonschema>=4.18`; `Draft202012Validator`, which `docs/COWORK-BOOTSTRAP.md` Probe X needs, landed in 4.18). There is no `pyproject.toml` or `setup.py`. The only non-stdlib import found in `tools/` is `jsonschema`; everything else is the Python 3 standard library.
 
 ## 4. Setup & run
 
 There is no build step, package, or installed CLI entry point — every script is invoked directly with `python`.
 
 **Prerequisites:**
-- Python 3 (tested here on 3.13.14) with `jsonschema` installed (`pip install jsonschema` — no lockfile exists, so this is the one thing to install by hand).
+- Python 3 (CI runs 3.11 and 3.13) with `jsonschema` installed (`pip install -r requirements.txt`; floor-pinned, no lockfile).
 - The seam directory reachable at `C:/Users/Owner/OneDrive - Oxford Capital Partners/Claude_Workspace/AAOS/` (hardcoded default in `tools/_aaos_common.py`'s `DEFAULT_SEAM_ROOT`; overridable per-invocation with `--seam-root`).
 
 **Run the test suite:**
 ```
 python -m unittest discover -s tests -p "test_*.py"
 ```
-(216 tests, all green as re-verified in this review; takes ~31 seconds.)
+(241 tests, all green on 2026-10-03; ~48 seconds locally. The same command runs in `.github/workflows/ci.yml`.)
 
 **Validate a state file against its schema:**
 ```
@@ -194,11 +217,11 @@ Requires `NOTION_TOKEN` in the environment unless `--dry-run`; POSTs a dated chi
 
 ## 6. Notes & gotchas
 
-- **The event log is the one place with a documented, fixed concurrency bug.** `docs/GATE3-REVIEW.md` records a Critical finding — two near-simultaneous direct appends to `aaos-events.ndjson` could silently clobber each other's line — fixed by introducing the spool-file + `O_EXCL` drain-lock mechanism now in `_aaos_common.py`. `COWORK-BOOTSTRAP.md` §8 repeats, as a hard rule, "never append to `aaos-events.ndjson` directly, even if it looks like just adding a line." **Caveat (2026-09-18): "fixed" is not currently true under contention.** Since CI was added on 2026-09-10, `tests/test_event_log_concurrency.py::test_concurrent_writers_lose_zero_events` has failed intermittently on GitHub's Linux runners (234/240, 232/240, 238/240 events surviving a full drain) while passing locally on Windows — tracked as OI-270, fix in progress on `fix/oi270-event-spool-lost-events`. Whoever lands that fix should delete this caveat.
+- **The event log is the one place with a documented, fixed concurrency bug.** `docs/GATE3-REVIEW.md` records a Critical finding — two near-simultaneous direct appends to `aaos-events.ndjson` could silently clobber each other's line — fixed by introducing the spool-file + `O_EXCL` drain-lock mechanism now in `_aaos_common.py`. `COWORK-BOOTSTRAP.md` §8 repeats, as a hard rule, "never append to `aaos-events.ndjson` directly, even if it looks like just adding a line." **Resolved (OI-270):** between 2026-09-10 and 2026-09-18 `tests/test_event_log_concurrency.py::test_concurrent_writers_lose_zero_events` failed intermittently on GitHub's Linux runners because a live drain lock was judged stale and stolen, losing events after fold. The fix (`fix(events): OI-270`, PR #8, merged to `main`) landed with green CI on the PR and on `main` (2026-09-18).
 - **Lease reclamation is intentionally NOT gated on heartbeat freshness.** `AAOS-SPEC.md` §7 explains the reasoning explicitly: gating on the (coarse, up-to-16-hour) Cowork heartbeat could wedge the queue for hours holding a genuinely-expired lease. Reclamation triggers on hard expiry alone; heartbeat only decides whether the reclaim is escalated as `DeadAgent` vs. routine `ExpiredLapsed`. The spec also notes this section's wording was corrected mid-project (Phase 3) after contradicting an earlier ADR.
 - **Notion is read-only and Derived, never authoritative**, specifically because the Notion API has no compare-and-swap/file-lock primitive AAOS's atomic-lease guarantees require — the project rejected a Notion-as-primary-store design (see `docs/adr/0001-architecture-selection.md`) purely on correctness grounds.
 - **A Cowork session in `SAFE-BY-HAND` mode must never edit an existing shared file, ever** — including `_seam-probe.md`, which the bootstrap doc notes literally contains a stale, superseded instruction telling the reader to "append a confirmation line" to it; the bootstrap explicitly overrides that embedded instruction rather than following it.
 - **`emit-event.py` is deliberately non-idempotent** — every invocation mints a new event; the code comments warn future maintainers not to "fix" this into a dedup primitive, since deduplication of logically-repeated events is the calling script's job, not the event layer's.
-- **`git status` in this repo currently reports CRLF-normalization warnings** on nearly every schema/doc file (`.gitattributes` was only added in the most recent commit to close this gap retroactively) — cosmetic, but worth knowing if a diff looks larger than expected after a checkout.
-- **The headline "v1.0 shipped" claim is self-graded.** `docs/DELIVERABLES-MANIFEST.md` states plainly that none of the six phase gates received explicit human (Gabriel) sign-off before the next phase began — each was presented and the project proceeded on the next message, a fact it flags consistently rather than treating as approval. Treat "v1.0 complete" as the project's own thorough self-assessment (216 tests green, 6 documented adversarial gate reviews, all findings independently re-verified), not as an externally ratified release.
-- **One real, unresolved gap:** `t-cowork-seam-confirm.json` remains queued and unconsumed in the live seam as of this writing — the one live end-to-end proof that a real Cowork session can round-trip through this system has not actually happened yet, per the manifest's own "standing open items" section.
+- **Line endings are normalized by `.gitattributes` (`* text=auto`).** A diff can still look larger than expected on a checkout made before that file landed.
+- **The headline "v1.0 shipped" claim is self-graded.** `docs/DELIVERABLES-MANIFEST.md` states plainly that none of the six phase gates received explicit human (Gabriel) sign-off before the next phase began — each was presented and the project proceeded on the next message, a fact it flags consistently rather than treating as approval. Treat "v1.0 complete" as the project's own thorough self-assessment (241 tests green today, 173 at v1.0 per the manifest; 6 documented adversarial gate reviews, all findings independently re-verified), not as an externally ratified release.
+- **Seam-confirmation gap closed, with a caveat:** `docs/DELIVERABLES-MANIFEST.md` still lists the live Cowork round-trip as a standing open item (it was written at v1.0). The live seam since shows a `cowork`-authored return handoff (2026-07-10) and `t-cowork-seam-confirm` archived (2026-08-16). Still queued in the live seam: `t-cowork-jsonschema-pin-952743` (Cowork's request about the jsonschema pin; `requirements.txt` now declares the floor).
