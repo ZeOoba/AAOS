@@ -106,9 +106,9 @@ def _archive_task(task, args, resolved_now):
 
 def main(argv=None) -> int:
     args = build_arg_parser().parse_args(argv)
-    resolved_now = _resolve_now(args.now)
 
     try:
+        resolved_now = _resolve_now(args.now)
         aaos.require_seam_reachable(args.seam_root)
         task = aaos.load_task(args.task_id, args.project, root=args.seam_root)
 
@@ -153,9 +153,9 @@ def main(argv=None) -> int:
             root=args.seam_root,
         )
 
-        lock_file = aaos.lock_path(args.task_id, args.project, root=args.seam_root)
-        if lock_file.exists():
-            aaos.archive_lock(lock_file, now=resolved_now)
+        aaos.archive_lock_after_commit(
+            aaos.lock_path(args.task_id, args.project, root=args.seam_root), now=resolved_now
+        )
 
         print(f"COMPLETED: {args.task_id} (event {event_id})")
 
@@ -180,6 +180,8 @@ def main(argv=None) -> int:
     except aaos.EventCommitError as exc:
         print(f"EVENT COMMIT FAILURE: {exc}", file=sys.stderr)
         return 5
+    except Exception as exc:
+        return aaos.unexpected_error_exit(exc)
 
 
 if __name__ == "__main__":

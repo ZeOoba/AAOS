@@ -14,7 +14,9 @@ Escalated/CorruptState marker, skip, never steal. Else reclaim_decision
 _aaos_common.reclaim_decision's docstring / PHASE3-DESIGN.md section
 1.9). Reclaimable + not dry-run: stage task state="queued" (drop lease)
 -> emit LeaseExpired -> rename -> archive_lock. classification ==
-"DeadAgent" additionally emits Escalated.
+"DeadAgent" additionally emits Escalated. A reclaimable (expired) lock
+whose task is NOT leased/in-progress is an orphan: archived (only if its
+content is unchanged since it was read), reported as ORPHAN LOCK, no event.
 
 This is the script staged (not registered) as the candidate scheduled
 task -- fleet registration is deferred to Phase 4/5 supervised
@@ -161,6 +163,20 @@ def main(argv=None) -> int:
             # applies; we haven't verified that, only that the lease itself
             # is no longer live.
             if task.get("state") not in ("leased", "in-progress") or "lease" not in task:
+                # F02: the lock we read is expired past grace (reclaimable
+                # above) yet its task holds no lease -- e.g. a lease-task that
+                # crashed between creating the lock and committing the task.
+                # Left in place it DENIES the task to every caller until a
+                # human intervenes. Archive it, but only if it is still the
+                # exact lock we judged: a lease-task may have replaced it with
+                # a fresh live lock since (archive_lock_if_unchanged).
+                archived = aaos.archive_lock_if_unchanged(entry, lock, now=resolved_now)
+                if archived is not None:
+                    print(
+                        f"ORPHAN LOCK: {entry.name} expired but task {task_id} holds no lease "
+                        f"(state={task.get('state')!r}); archived to {archived.name}, no event emitted"
+                    )
+                    continue
                 print(
                     f"SKIP: {task_id} lease no longer live (state={task.get('state')!r}); "
                     "reclaimed or transitioned by another operation since this lock was read"

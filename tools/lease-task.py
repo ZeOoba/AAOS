@@ -71,9 +71,9 @@ def build_arg_parser() -> argparse.ArgumentParser:
 
 def main(argv=None) -> int:
     args = build_arg_parser().parse_args(argv)
-    resolved_now = _resolve_now(args.now)
 
     try:
+        resolved_now = _resolve_now(args.now)
         aaos.require_seam_reachable(args.seam_root)
         task = aaos.load_task(args.task_id, args.project, root=args.seam_root)
         lease = task.get("lease")
@@ -93,40 +93,51 @@ def main(argv=None) -> int:
         )
 
         if result.outcome == aaos.LeaseOutcome.ACQUIRED:
-            if result.reclaimed_prior is not None:
-                aaos.emit_event(
-                    type="LeaseExpired", actor="system", project_id=args.project,
-                    refs={"task": args.task_id}, now=resolved_now, root=args.seam_root,
+            # F02: the canonical lock now exists and is ours. If anything
+            # below fails (schema error, event-commit failure, anything), the
+            # task stays queued -- so archive the lock this call created, or
+            # the task is DENIED to everyone until the lock expires.
+            try:
+                if result.reclaimed_prior is not None:
+                    aaos.emit_event(
+                        type="LeaseExpired", actor="system", project_id=args.project,
+                        refs={"task": args.task_id}, now=resolved_now, root=args.seam_root,
+                    )
+
+                # result.lock is the *lock file's* dict (protocol_version,
+                # task_ref, holder, acquired, expires, session) -- the task
+                # schema's "lease" object is narrower (additionalProperties:
+                # false; only holder/acquired/expires/session), so project down
+                # to exactly those four before embedding it in the task.
+                new_task = dict(task)
+                new_task["state"] = "leased"
+                new_task["lease"] = {
+                    "holder": result.lock["holder"],
+                    "acquired": result.lock["acquired"],
+                    "expires": result.lock["expires"],
+                    "session": result.lock["session"],
+                }
+                new_task["updated_at"] = resolved_now.isoformat()
+
+                errors = aaos.validate_obj(new_task, "task")
+                if errors:
+                    raise aaos.CorruptStateError(f"leased task failed schema validation: {errors}")
+
+                lock_ref = str(aaos.lock_path(args.task_id, args.project, root=args.seam_root))
+                event_id = aaos.commit_state_change(
+                    new_task, aaos.task_path(args.task_id, args.project, root=args.seam_root),
+                    {
+                        "type": "TaskLeased", "actor": args.holder, "project_id": args.project,
+                        "refs": {"task": args.task_id, "lock": lock_ref}, "now": resolved_now,
+                    },
+                    root=args.seam_root,
                 )
-
-            # result.lock is the *lock file's* dict (protocol_version,
-            # task_ref, holder, acquired, expires, session) -- the task
-            # schema's "lease" object is narrower (additionalProperties:
-            # false; only holder/acquired/expires/session), so project down
-            # to exactly those four before embedding it in the task.
-            new_task = dict(task)
-            new_task["state"] = "leased"
-            new_task["lease"] = {
-                "holder": result.lock["holder"],
-                "acquired": result.lock["acquired"],
-                "expires": result.lock["expires"],
-                "session": result.lock["session"],
-            }
-            new_task["updated_at"] = resolved_now.isoformat()
-
-            errors = aaos.validate_obj(new_task, "task")
-            if errors:
-                raise aaos.CorruptStateError(f"leased task failed schema validation: {errors}")
-
-            lock_ref = str(aaos.lock_path(args.task_id, args.project, root=args.seam_root))
-            event_id = aaos.commit_state_change(
-                new_task, aaos.task_path(args.task_id, args.project, root=args.seam_root),
-                {
-                    "type": "TaskLeased", "actor": args.holder, "project_id": args.project,
-                    "refs": {"task": args.task_id, "lock": lock_ref}, "now": resolved_now,
-                },
-                root=args.seam_root,
-            )
+            except BaseException:
+                aaos.archive_lock_if_unchanged(
+                    aaos.lock_path(args.task_id, args.project, root=args.seam_root),
+                    result.lock, now=resolved_now,
+                )
+                raise
             print(f"ACQUIRED: {args.task_id} by {args.holder}/{args.session} (event {event_id})")
             return 0
 
@@ -163,6 +174,8 @@ def main(argv=None) -> int:
     except aaos.EventCommitError as exc:
         print(f"EVENT COMMIT FAILURE: {exc}", file=sys.stderr)
         return 5
+    except Exception as exc:
+        return aaos.unexpected_error_exit(exc)
 
 
 if __name__ == "__main__":
