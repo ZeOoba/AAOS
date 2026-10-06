@@ -8,57 +8,84 @@ AAOS is a **filesystem-based task queue and handoff protocol** that lets two Cla
 
 ```mermaid
 flowchart TB
-    subgraph GIT["Git repo (this repo) — C:/Users/Owner/AAOS — Source of Truth for CODE + CONTRACTS"]
-        SCHEMAS["schemas/*.schema.json (5)\nagent-registry.json (2 entries)\ndocs/, templates/, examples/, ADRs (6)\nrequirements.txt, .github/workflows/ci.yml"]
-        TESTS["tests/ (267 unittest cases)\nrun by CI: ubuntu-latest, Python 3.11 + 3.13\n(per-test tmpdir seams, never the live seam)"]
-    TOOLS["tools/*.py CLI scripts\n(create/lease/complete/fail-task,\npost-handoff, expire-leases,\nemit-event, validate,\nderive-heartbeat, project-notion,\npublish-contracts, publish-notion,\ncheck-contract-drift)\n+ tools/_aaos_common.py shared library"]
-    end
-    TESTS -. "exercises" .-> TOOLS
-
-    subgraph SEAM["Seam — OneDrive-synced folder, NO git — Claude_Workspace/AAOS/"]
-        CONTRACTS["contracts/ (DERIVED read-only mirror,\npublished by publish-contracts.py)"]
-        TASKS["projects/ora-ops/tasks/*.json\n(Source of Truth; single-writer via lease)"]
-        LOCKS["projects/ora-ops/locks/*.lock\n(Ephemeral; exclusive-create + TTL)"]
-        HANDOFFS["projects/ora-ops/handoffs/*.json\n(Source of Truth; write-once)"]
-        EVENTS["projects/ora-ops/events/aaos-events.ndjson\n(Source of Truth, append-only;\nwriters go through emit-event.py /\n_aaos_common spool + drain)\n+ .../ndjson.pending/ spool dir"]
-        HEARTBEAT["heartbeat.json (Derived projection;\nnot present at the live seam —\nno scheduled caller feeds derive-heartbeat.py)"]
-        BUILDSTATE["state/BUILD-STATE.md (build continuity)"]
+    subgraph GIT["Git repo C:/Users/Owner/AAOS (contracts + code; no runtime state)"]
+        SCHEMAS["schemas/*.schema.json (5)\nagent-registry.json (2 agents)\ntemplates/, docs/, adr/ (6)
+requirements.txt, .github/workflows/ci.yml"]
+        COMMON["tools/_aaos_common.py\n(paths, atomic_write, acquire_lease,\ncommit_state_change, emit/spool/drain, validate_obj)"]
+        VALID["tools/validate.py\n(schema + protocol_version + write_scope)"]
+        QCLI["queue CLIs: create / lease / complete / fail-task,\npost-handoff, emit-event"]
+        SWEEP["expire-leases.py"]
+        DERIVE["derive-heartbeat.py\n(pure)"]
+        PROJ["project-notion.py\n(pure local read)"]
+        PUBN["publish-notion.py\n(urllib POST)"]
+        PUBC["publish-contracts.py"]
+        DRIFT["check-contract-drift.py\n(read-only audit)"]
+        TESTS["tests/ (unittest; per-test tmpdir seams,\nnever the live seam)\nCI: ubuntu-latest, Python 3.11 + 3.13"]
     end
 
-    CODE["Claude Code CLI session\n(agent id: claude-code)\nruns tools/*.py directly as subprocess"]
-    COWORK["Claude Cowork session\n(agent id: cowork)\nMODE=FULL-EXEC: runs tools/*.py too\nMODE=SAFE-BY-HAND: hand-writes new files only\n(never edits an existing shared file)"]
+    subgraph SEAM["Seam: OneDrive-synced, no git: Claude_Workspace/AAOS/"]
+        CONTRACTS["contracts/ (DERIVED mirror + PUBLISHED.json)"]
+        TASKS["projects/ora-ops/tasks/*.json\n(task.lease = DERIVED projection of lock)"]
+        LOCKS["projects/ora-ops/locks/*.lock (+ _archive/)\n(AUTHORITY for lease ownership: ADR-0006 D1,\nnot yet implemented)"]
+        HANDOFFS["handoffs/*.json (write-once)"]
+        SPOOL["events/aaos-events.ndjson.pending/*.json\n(COMMIT POINT of every event)"]
+        NDJSON["events/aaos-events.ndjson\n(folded view; rewritten whole on drain)"]
+        HB["heartbeat.json (DERIVED; absent at live seam)"]
+        SIG["signals.json (input; NO producer exists)"]
+        PROJ_OUT["notion-projection.json (DERIVED)"]
+    end
 
-    UPSTREAM_CODE["fleet-session-hook.py session state\n+ fleet-status.py dual-fleet health"]
-    UPSTREAM_COWORK["Notion heartbeat page last_edited_time\n+ automation-health-monitor beacon table"]
-    NOTION["Notion Ops Hub\n(read-only DERIVED mirror only —\nnever primary store; no lock primitive)"]
+    CODE["Claude Code session\n(runs tools as subprocess)"]
+    COWORK["Cowork session\nFULL-EXEC: runs tools\nSAFE-BY-HAND: new files + spool files only"]
+    SCHED["CC/MCP scheduler fleet\nora-aaos-expire-leases (weekly Mon 07:20)\nora-aaos-publish-contracts"]
+    NOTION["Notion Ops Hub (DERIVED mirror,\nnew dated child page per publish)"]
+    UPSTREAM["External health signals\n(fleet-session-hook, fleet-status,\nNotion heartbeat page, health-monitor beacon)"]
+    AGENT_FETCH["Agent-session fetch step\n(UNBUILT: no scheduled caller)"]
 
-    TOOLS -- "publish-contracts.py copies schemas/docs/registry/templates\n(registered: ora-aaos-publish-contracts, CC/MCP fleet)" --> CONTRACTS
-    GIT -. "git-tree read (preferred, freshest)\nor seam-mirror read (fallback)" .-> COWORK
+    TESTS -. "exercises" .-> COMMON
+    CODE --> QCLI
+    COWORK -. "FULL-EXEC" .-> QCLI
+    COWORK -. "SAFE-BY-HAND: hand-write new file" .-> TASKS
+    COWORK -. "hand-write spool file" .-> SPOOL
+    SCHED --> SWEEP
+    SCHED --> PUBC
 
-    CODE -- "create/lease/complete/fail-task.py\npost-handoff.py, expire-leases.py\n(atomic write-rename + lease protocol)" --> TASKS
-    CODE --> LOCKS
-    CODE --> HANDOFFS
-    CODE -- "emit-event.py (commit point of every transaction)" --> EVENTS
-    COWORK -. "FULL-EXEC: same tools\nSAFE-BY-HAND: new task/handoff files\nonly + event SPOOL files only,\nnever direct .ndjson append" .-> TASKS
-    COWORK -.-> HANDOFFS
-    COWORK -. "spool file in .../ndjson.pending/" .-> EVENTS
+    QCLI --> COMMON
+    SWEEP --> COMMON
+    COMMON -->|"validate_obj on every write"| VALID
+    VALID -->|reads| SCHEMAS
+    COMMON -->|"1. stage tmp state"| TASKS
+    COMMON -->|"acquire (os.link) / archive"| LOCKS
+    QCLI --> HANDOFFS
+    COMMON -->|"2. spool_event (durable commit)"| SPOOL
+    SPOOL -->|"3. best-effort drain under .drainlock"| NDJSON
+    COMMON -->|"4. os.replace tmp -> task.json"| TASKS
 
-    UPSTREAM_CODE --> DH["derive-heartbeat.py\n(pure projection, never pings anything)"]
-    UPSTREAM_COWORK --> DH
-    DH --> HEARTBEAT
+    SWEEP -->|"scan, reclaim_decision"| LOCKS
+    SWEEP -->|"reset to queued"| TASKS
+    SWEEP -->|"drain first; emit LeaseExpired/Escalated"| SPOOL
+    HB -->|"escalation class only"| SWEEP
 
-    TASKS --> PN["project-notion.py\n(pure local read: tasks + events + heartbeat)"]
-    EVENTS --> PN
-    HEARTBEAT --> PN
-    PN -- "writes notion-projection.json\n(local seam file, no network)" --> PUBLISHN["publish-notion.py\n(stdlib urllib POST; NOTION_TOKEN required\nunless --dry-run)"]
-    PUBLISHN -- "POST /v1/pages\n(dated child page under Ops Hub)" --> NOTION
+    UPSTREAM --> AGENT_FETCH --> SIG --> DERIVE
+    SCHEMAS -->|registry| DERIVE
+    DERIVE --> HB
 
-    EXPIRE["expire-leases.py\n(registered: ora-aaos-expire-leases,\nCC/MCP fleet, weekly Mon 07:20 ET)"] -- "sweeps + reclaims stale locks,\nresets task to queued,\nemits LeaseExpired/Escalated" --> LOCKS
-    EXPIRE --> TASKS
+    TASKS --> PROJ
+    SPOOL --> PROJ
+    NDJSON --> PROJ
+    HB --> PROJ
+    PROJ --> PROJ_OUT --> PUBN
+    PUBN -->|"POST /v1/pages (no retry)"| NOTION
+
+    SCHEMAS --> PUBC --> CONTRACTS
+    CONTRACTS -. "mirror read (fallback)" .-> COWORK
+    GIT -. "git-tree read (preferred)" .-> COWORK
+    SCHEMAS --> DRIFT
+    CONTRACTS --> DRIFT
 ```
-<!-- diagram-verified: 2026-10-03 -->
+<!-- diagram-verified: 2026-10-06 against origin/main 12ae2e4 -->
 
-**Reading the diagram:** there is no coordinator process, no message broker, and no agent runtime loop — the flowchart is deliberately flat. "Coordination" is two independent CLI invocations (one per surface, at different times) reading and atomically rewriting the same small set of JSON files under a lease/lock discipline, plus a derived heartbeat/Notion-projection layer that is read-only and never itself a source of truth. The one genuinely live network call anywhere in this repo is `publish-notion.py`'s POST to the Notion API (stdlib `urllib`, no new dependency) — everything upstream of it, including `project-notion.py`'s payload build and `derive-heartbeat.py`'s projection, stays pure local-file computation, and a publish failure there is never treated as a queue failure. Two components have an external trigger, both on ORA's CC/MCP scheduler fleet rather than manual one-offs: `expire-leases.py` runs unattended as `ora-aaos-expire-leases` (weekly, Mondays 07:20 ET) and `publish-contracts.py` as `ora-aaos-publish-contracts`. The heartbeat/Notion-projection chain (`derive-heartbeat.py` → `project-notion.py` → `publish-notion.py`) is built and tested but has no scheduled caller: as of 2026-10-03 the live seam holds no `heartbeat.json`, `signals.json`, or `notion-projection.json`, so that half of the diagram shows the designed flow, not a running one.
+**Reading the diagram:** there is no coordinator process, no message broker, and no agent runtime loop — the flowchart is deliberately flat. "Coordination" is two independent CLI invocations (one per surface, at different times) reading and atomically rewriting the same small set of JSON files under a lease/lock discipline, plus a derived heartbeat/Notion-projection layer that is read-only and never itself a source of truth. The one genuinely live network call anywhere in this repo is `publish-notion.py`'s POST to the Notion API (stdlib `urllib`, no new dependency) — everything upstream of it, including `project-notion.py`'s payload build and `derive-heartbeat.py`'s projection, stays pure local-file computation, and a publish failure there is never treated as a queue failure. Two components have an external trigger, both on ORA's CC/MCP scheduler fleet rather than manual one-offs: `expire-leases.py` runs unattended as `ora-aaos-expire-leases` (weekly, Mondays 07:20 ET) and `publish-contracts.py` as `ora-aaos-publish-contracts`. The heartbeat/Notion-projection chain (`derive-heartbeat.py` → `project-notion.py` → `publish-notion.py`) is built and tested but has no scheduled caller: as of 2026-10-03 the live seam holds no `heartbeat.json`, `signals.json`, or `notion-projection.json`, so that half of the diagram shows the designed flow, not a running one. In the diagram, `signals.json` is the heartbeat chain's input and has no producer (the agent-session fetch step is UNBUILT); the spool file in `events/aaos-events.ndjson.pending/` — not the NDJSON — is each event's durable commit point; and the lock file is the lease-ownership authority while `task.lease` is only a projection of it (ADR-0006, not yet implemented in code). Four further diagrams (task lifecycle sequence, event commit/drain pipeline, lease authority vs projection, derived projection chain) are in [`docs/DIAGRAMS.md`](docs/DIAGRAMS.md).
 
 ### Task lifecycle (state machine)
 
@@ -157,7 +184,7 @@ There is no build step, package, or installed CLI entry point — every script i
 ```
 python -m unittest discover -s tests -p "test_*.py"
 ```
-(267 tests, all green on 2026-10-03; ~48 seconds locally. The same command runs in `.github/workflows/ci.yml`.)
+(267 tests, all green on 2026-10-03 — recounted 2026-10-06 with `python -m unittest discover -s tests -p "test_*.py"`: 267, OK. The same command runs in `.github/workflows/ci.yml`; CI is the live source of truth for the count.)
 
 **Validate a state file against its schema:**
 ```
