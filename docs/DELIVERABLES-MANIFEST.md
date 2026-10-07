@@ -10,13 +10,13 @@ Checks off the master prompt's §5 "Deliverables Manifest" verbatim against what
 - [x] `docs/V2-BACKLOG.md` — 6 items, each with a stated deferral reason (not a restatement of the Non-Goals list).
 - [x] `docs/OPERATIONS.md` — 5 sections: inspect the queue, break a stuck lock, archive a task, roll back a protocol version, and a §5 failure-mode quick reference mapping all 10 Phase 5 scenarios to a recovery action.
 - [x] `docs/COWORK-BOOTSTRAP.md` — self-contained, published to the seam `contracts/` mirror; a 3-probe capability-detection preamble, explicit fail-closed stop-and-report protocol, and the SAFE-BY-HAND write recipes with an explicit forbidden-actions list and reasons.
-- [x] `docs/adr/0001-architecture-selection.md` … `0005-heartbeat-derivation.md` — all 5, each Accepted, each with Context/Decision/Consequences; ADR-0003 and 0001 carry Gate 3/5-review correction notes where their original text was found stale.
+- [x] `docs/adr/0001-architecture-selection.md` … `0005-heartbeat-derivation.md` — all 5 at v1.0 (ADR-0006 was added later), each Accepted, each with Context/Decision/Consequences; ADR-0003 and 0001 carry Gate 3/5-review correction notes where their original text was found stale.
 
 ## `schemas/*.json (5) + tools/validate.* + full test suite`
 
 - [x] `schemas/{agent-registry,task,handoff,event,heartbeat}.schema.json` — all 5, JSON Schema draft 2020-12, re-validated against the meta-schema this session (`Draft202012Validator.check_schema`, all 5 `OK`).
 - [x] `tools/validate.py` — the validator CLI (schema inference, `protocol_version` gating, write-scope colonization guard).
-- [x] Full test suite — **173 tests, all green** (`python -m unittest discover -s tests -p "test_*.py"`, independently re-run this session after every fix).
+- [x] Full test suite — **173 tests, all green at v1.0 (historical; 267 as of origin/main 12ae2e4, recounted 2026-10-06)** (`python -m unittest discover -s tests -p "test_*.py"`, independently re-run this session after every fix).
 
 ## `Queue/lock/lease/event tooling with tests`
 
@@ -61,4 +61,4 @@ Checks off the master prompt's §5 "Deliverables Manifest" verbatim against what
 - `tools/publish-notion.py` (built in its own worktree, request approved in-turn) is the "future agent-session call site" this section's original item 3 deferred for `project-notion.py`'s output — it POSTs the projection payload as a dated child page under the Notion Ops Hub (`32b6ecd8…`), per `docs/CAPABILITY-MAP.md` item 3's REUSE guidance (existing child-page convention, no parallel database). Stdlib-only HTTP (no new dependency), pure-builder/thin-IO-wrapper split matching this repo's house style, 22 unit tests (dry-run, mocked success, mocked HTTPError/URLError). Still never touches tasks/locks/events — read-only against the local projection, write-only against Notion, matching ADR-0001 (Notion stays Derived, never primary).
 - **Scheduled-task registration of `expire-leases.py`** — this section's original item 2 was already stale when read on 2026-07-26: `list_scheduled_tasks` shows `ora-aaos-expire-leases` live on the CC/MCP fleet since 2026-07-10 (cadence halved 6×→3×/day on 2026-07-16 per Fleet Ledger v2 ruling C2; last successful run 2026-07-26T17:12 ET, cron `12 7,13,19 * * *`). This doc's claim that registration was "never attempted... never requested" was never corrected after the fact — a live-registry check should be the standing practice before citing this file's open-items list as current, not just reading it.
 
-**v1.0 is complete.** All six gates self-assessed PASS with evidence; all master-prompt deliverables present; 173/173 tests green; every adversarial/independent-review finding across all five phases (4 Critical, several Important, many Minor) resolved and independently re-verified, not merely accepted.
+**v1.0 is complete.** All six gates self-assessed PASS with evidence; all master-prompt deliverables present; 173/173 tests green at v1.0 (267 on origin/main as of 2026-10-06); every adversarial/independent-review finding across all five phases (4 Critical, several Important, many Minor) resolved and independently re-verified, not merely accepted.

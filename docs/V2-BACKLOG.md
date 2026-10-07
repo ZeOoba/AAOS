@@ -2,7 +2,7 @@
 
 Design questions and extensions that surfaced during Phase 1 architecture work — legitimate future work, explicitly out of scope for v1. Each entry states why it's deferred, not just that it is.
 
-1. **Lease auto-renew piggybacked on heartbeat.** v1 lease renewal is manual (an explicit `--renew` call before expiry). Auto-renewing a lease automatically while its holder is known-alive is deferred: the 45-minute TTL plus manual renewal already covers every job length observed in this environment, and auto-renew would couple the health-monitoring chain to the lock manager in a way not yet justified by real need.
+1. **Lease auto-renew piggybacked on heartbeat.** v1 has no lease renewal at all: it is specified (AAOS-SPEC.md §7) but UNBUILT, and no `--renew` flag or renew tool exists in `tools/`. Auto-renewing a lease while its holder is known-alive is deferred behind that: the 45-minute TTL already covers every job length observed in this environment, and auto-renew would couple the health-monitoring chain to the lock manager in a way not yet justified by real need.
 
 2. **Second-project onboarding runbook.** The path convention (`projects/<project-id>/...`) already supports multiple projects, but only one — `ora-ops` — is seeded in v1. The concrete runbook for onboarding a second project (registry `write_scope` additions, a new Notion view, sweep scoping) is deferred until a real second project actually exists; writing that runbook speculatively now would itself be the kind of premature multi-project machinery the Non-Goals forbid.
 
