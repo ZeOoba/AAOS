@@ -1,4 +1,4 @@
-> Produced by aaos-eval-plan-premortem run wf_c4449398-61e on 2026-10-17 (AAOS-grounded copy of cc-eval-plan-premortem). Extends docs/superpowers/specs/2026-10-17-aaos-optimization-design.md (D1-D6 stay ratified; every change is recorded in the section 1a delta table). Ballot Q1-Q9 ratified 2026-10-17 (all option A); Q10-Q15 await the L0 spike.
+> Produced by aaos-eval-plan-premortem run wf_c4449398-61e on 2026-10-17 (AAOS-grounded copy of cc-eval-plan-premortem). Extends docs/superpowers/specs/2026-10-17-aaos-optimization-design.md (D1-D6 stay ratified; every change is recorded in the section 1a delta table). Ballot Q1-Q15 ratified 2026-10-17 (all option A); L0 read-only findings in section 13, Cowork probe result pending.
 
 # AAOS Optimization: Hardened Improvement Plan (Phase 4)
 
@@ -168,7 +168,7 @@ Status: hardened and validated. Every critical and high pre-mortem objection is 
 - Merge gate: a bot check is never a verdict. Blast-radius PRs (B2, B3b settings and hooks) need an adversarial subagent pass.
 
 ## 8. HUMAN-RATIFICATION-REQUIRED backlog and decision ballot
-**Status 2026-10-17: Q1-Q9 ratified (option A each). Q10-Q15 remain open until the L0 spike returns.** Ratifying Q1-Q9 does not ratify the RED items listed at the end of this section; each still needs its own in-turn confirmation.
+**Status 2026-10-17: Q1-Q15 ratified (option A each). Q14's Cowork probe result is still pending; RED items below still need their own in-turn confirmation.** Ratifying Q1-Q9 does not ratify the RED items listed at the end of this section; each still needs its own in-turn confirmation.
 Each item is multiple choice with the recommended option first; Gabriel answers in chat. R0a = Q1-Q9 (needed for Phase 1). R0b = Q10-Q15 (after L0).
 
 **Q1 (sequencing): first implementation PRs**
@@ -226,31 +226,37 @@ Each item is multiple choice with the recommended option first; Gabriel answers 
 - (C) No hook; rely on B3a validation only: less machinery, but no execution-time defense.
 
 **Q10 (DQ6): archive semantics (R0b)**
+**RATIFIED 2026-10-17: option (A): flag in place; files stay in tasks/; the projection filters terminal states; B4 is the sole owner.**
 - (A) `archived` flag in place; files stay in `tasks/`; the projection filters terminal states; B4 is the sole owner **(Recommended)**: no reader breakage, no two-step move.
 - (B) Move to `tasks/_archive/` with a crash-recovery test and every reader updated: a cleaner directory, but a new non-atomic transition plus reader churn across the tools and Cowork recipes.
 - (C) No archive: unbounded projection (M24 open).
 
 **Q11 (DQ8): routing enforcement, owner_agent/to_agent (R0b; ADR-0003 amendment if accepted)**
+**RATIFIED 2026-10-17: option (A): enforce in acquire_lease against the registry after AMD-0003 merges; an unreadable registry fails the acquisition closed.**
 - (A) Enforce in `acquire_lease` against the registry after AMD-0003 merges; a registry-unreadable lease acquisition fails closed **(Recommended)**: closes M38.
 - (B) Warn-only (Escalated on mismatch): no ADR change, but spoofed holders proceed.
 - (C) Leave unenforced.
 
 **Q12 (DQ9): created_by scoping for Cowork-authored tasks (R0b; ADR-0001/NON-GOALS note if accepted)**
+**RATIFIED 2026-10-17: option (A): Cowork-authored tasks run under a repo-tracked Code-side allowlist policy, never their own write_scope; blast-radius paths always denied.**
 - (A) Cowork-authored tasks run under a repo-tracked Code-side allowlist policy, never their own `write_scope`; blast-radius paths unconditionally denied **(Recommended)**: closes M25 escalation of scope.
 - (B) Trust `write_scope` after B3a schema validation: simpler, but seam-controlled scope.
 - (C) Forbid Cowork-authored claude-code tasks entirely: safest, but kills the loop.
 
 **Q13: NDJSON log segmentation (M16) before V1**
+**RATIFIED 2026-10-17: option (A): defer segmentation, mitigated by B1 conflict-copy and reconciliation detectors; reopen at >5 MB, p95 drain >2 s, or any conflict copy.**
 - (A) Defer, with B1 conflict-copy and reconciliation detectors plus size and drain-duration thresholds as mitigation and a stated reopen trigger **(Recommended)**: avoids redesigning the fold mid-hardening.
 - (B) Build immutable dated segments before V1, so the soak measures the production design: more correct, but touches the fold again (an ADR-0004 amendment).
 - (C) Defer with no detector: silent-loss risk unmeasured.
 
 **Q14: L0 / V1 Cowork leg**
+**RATIFIED 2026-10-17: option (A): one desktop Cowork probe run by Gabriel (docs/superpowers/plans/2026-10-17-l0-cowork-probe.md); fallback Code-only contenders after 2 sessions. Probe RESULT still pending.**
 - (A) Gabriel runs a one-time desktop Cowork probe in a scratch folder (read-only listing of how it reaches the seam); if it is not reproducible within the 2-session timebox, proceed with Code-only contenders **(Recommended)**: bounded, unblocks design.
 - (B) Skip the Cowork leg entirely: faster, but the cross-surface exclusivity assumption is never tested.
 - (C) Block A1 until a full Cowork contention soak passes: maximal evidence, unbounded stall.
 
 **Q15: B7 autonomous consumer (goal 2)**
+**RATIFIED 2026-10-17: option (A): design B7 now, build after B3b, scoped to an allowlisted task class, measured by handoff-to-action latency.**
 - (A) Approve design-only now; build after B3b, scoped to an allowlisted task class, success measured by handoff-to-action latency **(Recommended)**: honest path to a closed loop.
 - (B) Accept notification-only (B1/B2/B5) and record the human-gated loop in V2-BACKLOG: lowest risk, but goal 2 is not met.
 - (C) Build now on B3a alone: fastest, but it executes seam-authored work without the execution-time backstop.
