@@ -138,7 +138,7 @@ AAOS/
 │   └── check-contract-drift.py  read-only guard: has the seam mirror drifted from the git tree?
 ├── requirements.txt        dependency floor: jsonschema>=4.18
 ├── .github/workflows/ci.yml  GitHub Actions: runs the suite on push/PR to main (Python 3.11, 3.13)
-├── tests/                  267 tests (unittest), all passing locally on 2026-10-03
+├── tests/                  unittest suite (current count and last-green date: see section 4, Setup & run)
 │   ├── _tool_loader.py         shared helper for importing hyphenated tools/*.py files in tests
 │   ├── test_aaos_common.py, test_queue_scripts.py, test_e2e_lifecycle.py,
 │   │   test_event_log_concurrency.py, test_failure_injection_matrix.py (17 tests),
@@ -184,7 +184,7 @@ There is no build step, package, or installed CLI entry point — every script i
 ```
 python -m unittest discover -s tests -p "test_*.py"
 ```
-(267 tests, all green on 2026-10-03 — recounted 2026-10-06 with `python -m unittest discover -s tests -p "test_*.py"`: 267, OK. The same command runs in `.github/workflows/ci.yml`; CI is the live source of truth for the count.)
+(272 tests, all green on 2026-10-17 on Windows under Python 3.11 and 3.13 — recounted with `python -m unittest discover -s tests -p "test_*.py"`: 272, OK. The same command runs in `.github/workflows/ci.yml`; CI is the live source of truth for the count.)
 
 **Validate a state file against its schema:**
 ```

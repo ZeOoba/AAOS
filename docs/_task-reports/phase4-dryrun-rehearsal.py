@@ -1,8 +1,27 @@
-import sys, json, os, hashlib, re, subprocess
+# HISTORICAL Phase-4 rehearsal (kept as a record). Guarded since audit M52: it writes and removes
+# sentinel files inside the seam it is pointed at, so it REFUSES to run unless given an explicit
+# --seam-root, and refuses the live default root (tools/_aaos_common.DEFAULT_SEAM_ROOT). Point it
+# at a copy of the seam tree, never at the live OneDrive seam.
+import argparse, sys, json, os, hashlib, re, subprocess
 from datetime import datetime
 
-SEAM = r"C:\Users\Owner\OneDrive - Oxford Capital Partners\Claude_Workspace\AAOS"
-GIT_TREE = r"C:\Users\Owner\AAOS"
+GIT_TREE = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+sys.path.insert(0, os.path.join(GIT_TREE, "tools"))
+from _aaos_common import DEFAULT_SEAM_ROOT  # noqa: E402
+
+_ap = argparse.ArgumentParser(description="Phase-4 dry-run rehearsal (historical; needs a seam COPY).")
+_ap.add_argument("--seam-root", required=True, help="root of a COPY of the seam tree (never the live seam)")
+_args = _ap.parse_args()
+
+
+def _norm(p):
+    return os.path.normcase(os.path.abspath(p))
+
+
+if _norm(_args.seam_root) == _norm(DEFAULT_SEAM_ROOT):
+    sys.exit("REFUSED: --seam-root is the live default seam root; this rehearsal writes sentinels. "
+             "Pass a copy of the seam tree instead.")
+SEAM = _args.seam_root
 
 log = []
 
