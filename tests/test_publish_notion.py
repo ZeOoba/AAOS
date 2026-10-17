@@ -249,10 +249,26 @@ class MainCliTests(unittest.TestCase):
     def test_dry_run_exits_zero_and_prints_body(self):
         buf = io.StringIO()
         with patch("sys.stdout", buf):
-            code = self.module.main(["--in", str(self.payload_path), "--dry-run", "--now", "2026-07-26T00:00:00"])
+            code = self.module.main(["--in", str(self.payload_path), "--dry-run", "--now", "2026-07-26T00:00:00+00:00"])
         self.assertEqual(code, 0)
         printed = json.loads(buf.getvalue())
         self.assertIn("parent", printed)
+        self.assertIn("2026-07-26T00:00:00+00:00", json.dumps(printed))
+
+    def test_naive_or_garbage_now_exits_2_before_any_network_call(self):
+        """Audit review finding: publish-notion is the egress tool, and --now becomes the page title
+        timestamp. Like every other CLI it must reject a naive or unparseable value (exit 2), and it
+        must do so BEFORE building a request or touching the network."""
+        for bad in ("2026-07-26T00:00:00", "garbage", "2026-07-26"):
+            with self.subTest(now=bad):
+                buf = io.StringIO()
+                with patch("urllib.request.urlopen") as fake_urlopen, patch("sys.stderr", buf):
+                    with patch.dict("os.environ", {"NOTION_TOKEN": "ntn_x"}):
+                        code = self.module.main(["--in", str(self.payload_path), "--now", bad])
+                self.assertEqual(code, 2)
+                self.assertIn("USAGE ERROR", buf.getvalue())
+                self.assertIn("--now", buf.getvalue())
+                fake_urlopen.assert_not_called()
 
     def test_missing_payload_exits_2(self):
         buf = io.StringIO()

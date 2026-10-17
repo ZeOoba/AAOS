@@ -471,39 +471,45 @@ def parse_cli_now(now_str, flag: str = "--now") -> datetime:
         raise UsageError(f"{flag}: {exc}") from exc
 
 
-# argparse `type=` validators for CLI numeric flags (audit M03). They reject only INVALID values;
-# the ratified defaults (30s settle, 5-minute skew, 45-minute TTL) are defaults, never floors.
-
-def positive_int(text: str) -> int:
-    """int >= 1 (a zero or negative TTL would mint an already-expired lease)."""
-    try:
-        value = int(text)
-    except ValueError:
-        raise argparse.ArgumentTypeError(f"expected an integer >= 1, got {text!r}") from None
-    if value < 1:
-        raise argparse.ArgumentTypeError(f"must be >= 1, got {value}")
-    return value
+# argparse `type=` validators for CLI numeric flags (audit M03). They reject INVALID values only; the
+# ratified defaults (30s settle, 5-minute skew, 45-minute TTL) are defaults, never floors.
+#
+# The ceilings below are deliberately loose SANITY bounds, not policy: they keep absurd values from
+# overflowing timedelta/sleep (exit 1 with a traceback-style error) or from holding a lock for years
+# (a huge --settle-sec sleeps after the lock is created). The real lease-TTL ceiling is ADR-0006 D3
+# (LEASE_TTL_CAP, not yet implemented) and will be tighter; it replaces MAX_CLI_MINUTES for --ttl-min.
+MAX_CLI_MINUTES = 525_600   # one year, in minutes
+MAX_CLI_SETTLE_SEC = 3600.0  # one hour
 
 
-def nonneg_int(text: str) -> int:
-    """int >= 0 (a negative skew makes a LIVE foreign lease look expired and reclaimable)."""
-    try:
-        value = int(text)
-    except ValueError:
-        raise argparse.ArgumentTypeError(f"expected an integer >= 0, got {text!r}") from None
-    if value < 0:
-        raise argparse.ArgumentTypeError(f"must be >= 0, got {value}")
-    return value
+def _bounded_int(lo: int, hi: int, why_low: str):
+    def parse(text: str) -> int:
+        try:
+            value = int(text)
+        except ValueError:
+            raise argparse.ArgumentTypeError(f"expected an integer in [{lo}, {hi}], got {text!r}") from None
+        if value < lo:
+            raise argparse.ArgumentTypeError(f"must be >= {lo} ({why_low}), got {value}")
+        if value > hi:
+            raise argparse.ArgumentTypeError(f"must be <= {hi}, got {value}")
+        return value
+    return parse
+
+
+# int >= 1 (a zero or negative TTL would mint an already-expired lease)
+positive_int = _bounded_int(1, MAX_CLI_MINUTES, "a zero or negative TTL mints an already-expired lease")
+# int >= 0 (a negative skew makes a LIVE foreign lease look expired and reclaimable)
+nonneg_int = _bounded_int(0, MAX_CLI_MINUTES, "a negative skew makes a live lease look expired")
 
 
 def finite_nonneg_float(text: str) -> float:
-    """finite float >= 0 (rejects negative, NaN and +/-Inf)."""
+    """finite float in [0, MAX_CLI_SETTLE_SEC] (rejects negative, NaN, +/-Inf and absurdly long settles)."""
     try:
         value = float(text)
     except ValueError:
-        raise argparse.ArgumentTypeError(f"expected a number >= 0, got {text!r}") from None
-    if value != value or value in (float("inf"), float("-inf")) or value < 0:
-        raise argparse.ArgumentTypeError(f"must be a finite number >= 0, got {text!r}")
+        raise argparse.ArgumentTypeError(f"expected a number in [0, {MAX_CLI_SETTLE_SEC:g}], got {text!r}") from None
+    if value != value or value in (float("inf"), float("-inf")) or value < 0 or value > MAX_CLI_SETTLE_SEC:
+        raise argparse.ArgumentTypeError(f"must be a finite number in [0, {MAX_CLI_SETTLE_SEC:g}], got {text!r}")
     return value
 
 
