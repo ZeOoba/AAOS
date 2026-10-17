@@ -1,27 +1,58 @@
 """tests/test_demo_guard.py -- C0 / audit M52: executable demos under docs/ must not be able to
 touch the live OneDrive seam by accident.
 
-docs/_task-reports/phase4-dryrun-rehearsal.py was written to run against the live seam and (step 8)
-writes then removes a sentinel there. Importing nothing from tools/, it duplicated the live path as a
-literal. These tests pin the guard: no live-path literal, no module-level SEAM constant, an explicit
---seam-root is required, and the live default root is refused before any filesystem access.
+docs/_task-reports/phase4-dryrun-rehearsal.py writes and removes sentinel files inside whatever seam
+it is pointed at. The refusal logic lives in docs/_task-reports/_demo_guard.py so it can be tested
+IN-PROCESS against a decoy folder. No test here ever passes the real live seam path to the demo: a
+regression in the guard must not be able to turn a test run into a write to the live seam.
 
-The static tests never execute the demo. The dynamic tests only run it in ways that must be
-refused before the first seam read, so they cannot touch the live seam even if the guard regressed
-to a no-op only by failing loudly (the live default root is passed purely as a refusal probe).
+Review findings addressed: the guard compared abspath+normcase only, so a junction/symlink/short-name
+path to the live seam slipped past it; and the old refusal test executed the demo against the live path.
 """
 from __future__ import annotations
 
+import os
+import shutil
 import subprocess
 import sys
+import tempfile
 import unittest
 from pathlib import Path
 
-import _tool_loader  # noqa: F401  (puts tools/ on sys.path)
-import _aaos_common as aaos
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+
+import _tool_loader  # noqa: F401,E402  (puts tools/ on sys.path)
+import _aaos_common as aaos  # noqa: E402
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
-DEMO = REPO_ROOT / "docs" / "_task-reports" / "phase4-dryrun-rehearsal.py"
+REPORTS_DIR = REPO_ROOT / "docs" / "_task-reports"
+DEMO = REPORTS_DIR / "phase4-dryrun-rehearsal.py"
+sys.path.insert(0, str(REPORTS_DIR))
+
+import _demo_guard  # noqa: E402
+
+
+def _make_dir_link(link: Path, target: Path) -> bool:
+    """Symlink, or a directory junction on Windows (no admin needed). False if neither works."""
+    try:
+        os.symlink(str(target), str(link), target_is_directory=True)
+        return True
+    except (OSError, NotImplementedError):
+        pass
+    if os.name == "nt":
+        proc = subprocess.run(["cmd", "/c", "mklink", "/J", str(link), str(target)], capture_output=True)
+        return proc.returncode == 0 and link.exists()
+    return False
+
+
+def _remove_link(link: Path) -> None:
+    try:
+        os.rmdir(str(link))  # removes a junction / directory symlink without touching its target
+    except OSError:
+        try:
+            os.unlink(str(link))
+        except OSError:
+            pass
 
 
 class DemoStaticGuard(unittest.TestCase):
@@ -40,23 +71,68 @@ class DemoStaticGuard(unittest.TestCase):
         self.assertIn("--seam-root", self.src)
         self.assertIn("DEFAULT_SEAM_ROOT", self.src)
 
+    def test_guard_runs_before_the_first_seam_access(self):
+        call = self.src.find("refuse_live_seam(")
+        first_use = self.src.find("os.path.join(SEAM")
+        self.assertGreater(call, 0, "demo does not call refuse_live_seam()")
+        self.assertGreater(first_use, 0)
+        self.assertLess(call, first_use, "the guard must run before any path under the seam is built")
 
-class DemoRefusals(unittest.TestCase):
-    def _run(self, *args):
-        return subprocess.run(
-            [sys.executable, str(DEMO), *args],
-            capture_output=True, text=True, timeout=60,
-        )
 
-    def test_refuses_without_seam_root(self):
-        proc = self._run()
+class RefuseLiveSeam(unittest.TestCase):
+    """The guard, in-process, with a decoy standing in for the live seam."""
+
+    def setUp(self):
+        self.tmp = Path(tempfile.mkdtemp(prefix="aaos-guard-"))
+        self.addCleanup(shutil.rmtree, str(self.tmp), ignore_errors=True)
+        self.live = self.tmp / "live-decoy" / "AAOS"
+        self.live.mkdir(parents=True)
+        self.other = self.tmp / "copy" / "AAOS"
+        self.other.mkdir(parents=True)
+
+    def _refused(self, candidate):
+        with self.assertRaises(SystemExit) as ctx:
+            _demo_guard.refuse_live_seam(str(candidate), str(self.live))
+        self.assertIn("REFUSED", str(ctx.exception.code))
+
+    def test_the_live_root_itself_is_refused(self):
+        self._refused(self.live)
+
+    def test_spelling_variants_of_the_live_root_are_refused(self):
+        self._refused(str(self.live) + os.sep)
+        self._refused(self.live / ".." / "AAOS")
+        self._refused(str(self.live).upper() if os.name == "nt" else self.live)
+
+    def test_a_junction_or_symlink_to_the_live_root_is_refused(self):
+        link = self.tmp / "alias"
+        if not _make_dir_link(link, self.live):
+            self.skipTest("cannot create a symlink or junction on this host")
+        self.addCleanup(_remove_link, link)
+        # Prove the test discriminates: the previous abspath+normcase comparison would have missed it.
+        self.assertNotEqual(os.path.normcase(os.path.abspath(str(link))),
+                            os.path.normcase(os.path.abspath(str(self.live))))
+        self._refused(link)
+
+    def test_a_different_directory_is_allowed(self):
+        _demo_guard.refuse_live_seam(str(self.other), str(self.live))
+
+    def test_nonexistent_paths_fall_back_to_a_path_comparison(self):
+        ghost = self.tmp / "no-such" / "AAOS"
+        with self.assertRaises(SystemExit):
+            _demo_guard.refuse_live_seam(str(ghost), str(ghost))
+        _demo_guard.refuse_live_seam(str(ghost), str(self.live))
+
+    def test_real_default_root_constant_is_what_the_demo_compares_against(self):
+        # Pure string check: nothing here touches the live seam.
+        self.assertIn("DEFAULT_SEAM_ROOT", DEMO.read_text(encoding="utf-8"))
+        self.assertTrue(aaos.DEFAULT_SEAM_ROOT)
+
+
+class DemoRefusesWithoutSeamRoot(unittest.TestCase):
+    def test_exits_nonzero_and_names_the_flag_before_doing_anything(self):
+        proc = subprocess.run([sys.executable, str(DEMO)], capture_output=True, text=True, timeout=60)
         self.assertNotEqual(proc.returncode, 0)
         self.assertIn("--seam-root", proc.stderr)
-
-    def test_refuses_live_default_root(self):
-        proc = self._run("--seam-root", aaos.DEFAULT_SEAM_ROOT)
-        self.assertNotEqual(proc.returncode, 0)
-        self.assertIn("REFUSED", proc.stderr)
 
 
 if __name__ == "__main__":

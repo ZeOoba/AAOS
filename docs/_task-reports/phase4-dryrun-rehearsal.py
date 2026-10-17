@@ -7,20 +7,16 @@ from datetime import datetime
 
 GIT_TREE = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 sys.path.insert(0, os.path.join(GIT_TREE, "tools"))
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from _aaos_common import DEFAULT_SEAM_ROOT  # noqa: E402
+from _demo_guard import refuse_live_seam  # noqa: E402
 
 _ap = argparse.ArgumentParser(description="Phase-4 dry-run rehearsal (historical; needs a seam COPY).")
 _ap.add_argument("--seam-root", required=True, help="root of a COPY of the seam tree (never the live seam)")
 _args = _ap.parse_args()
 
 
-def _norm(p):
-    return os.path.normcase(os.path.abspath(p))
-
-
-if _norm(_args.seam_root) == _norm(DEFAULT_SEAM_ROOT):
-    sys.exit("REFUSED: --seam-root is the live default seam root; this rehearsal writes sentinels. "
-             "Pass a copy of the seam tree instead.")
+refuse_live_seam(_args.seam_root, DEFAULT_SEAM_ROOT)
 SEAM = _args.seam_root
 
 log = []
