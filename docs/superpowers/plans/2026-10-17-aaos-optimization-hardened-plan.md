@@ -1,10 +1,10 @@
-> Produced by aaos-eval-plan-premortem run wf_c4449398-61e on 2026-10-17 (AAOS-grounded copy of cc-eval-plan-premortem). Supersedes the sequencing in docs/superpowers/specs/2026-10-17-aaos-optimization-design.md. Sections 8 (ballot) requires Gabriel's ratification.
+> Produced by aaos-eval-plan-premortem run wf_c4449398-61e on 2026-10-17 (AAOS-grounded copy of cc-eval-plan-premortem). Extends docs/superpowers/specs/2026-10-17-aaos-optimization-design.md (D1-D6 stay ratified; every change is recorded in the section 1a delta table). Ballot Q1-Q9 ratified 2026-10-17 (all option A); Q10-Q15 await the L0 spike.
 
 # AAOS Optimization: Hardened Improvement Plan (Phase 4)
 
 Date: 2026-10-17 · Branch `claude/aaos-optimization-plan-27d345` · Baseline: worktree HEAD `957140d`. That commit is docs-only on top of `618f081`, where the audit ran (cc-audit-army `wf_e31ede0a-2a7`, 52 confirmed findings M01-M52).
-Supersedes: the draft spec `docs/superpowers/specs/2026-10-17-aaos-optimization-design.md` (D1-D6) and the Phase-3 extended plan (A0-A6, B1-B6, C0, F0, V1, R0/DQ1-19).
-Status: hardened. Every critical and high pre-mortem objection is resolved below (see §9). RED items wait for Gabriel's ratification (§8).
+Extends: the draft spec `docs/superpowers/specs/2026-10-17-aaos-optimization-design.md` (D1-D6 remain ratified except where section 1a records a change) and re-sequences the Phase-3 extended plan (A0-A6, B1-B6, C0, F0, V1, R0/DQ1-19).
+Status: hardened and validated. Every critical and high pre-mortem objection is resolved (§9). The 14 post-hardening validation defects are resolved in §10-§12 (A0/A0.5 re-specified in §11; health feedback loop added in §12). Ballot Q1-Q9 ratified (§8). RED items and Q10-Q15 still wait for Gabriel (§8).
 
 ## 0. Ground rules (unchanged, restated so every PR inherits them)
 - **Goal priority:** (1) no committed state or event is lost or corrupted, (2) close the Cowork-to-Code loop, (3) no confidential or unvalidated data crosses the seam or reaches Notion, (4) operability, (5) native capabilities, without breaking the file seam.
@@ -37,13 +37,28 @@ Status: hardened. Every critical and high pre-mortem objection is resolved below
 9. **A6 is split** into a/b/c/d. There is a single archive owner (B4), and the A5 "no unlink" grep is scoped by helper.
 10. **Goal 2 is described honestly.** B1, B2 and B5 are *notification*; the loop is still gated on a human. A supervised CC-fleet consumer (B7) is put to Gabriel as a DQ, measured by handoff-to-action latency.
 
+### 1a. Delta table vs the draft spec (extends, does not overwrite)
+| Draft item | Hardened change | Reason |
+|---|---|---|
+| D4: amend ADR-0006 for CAS | Implement ADR-0006 D1-D4 as already ratified; drain-lock CAS goes through AMD-0004 / AMD-0006 (docs-only, merged before the code PR) | ADR-0006 D2 already ratifies the compare-and-swap; the missing piece was implementation |
+| A1: reuse `archive_lock_if_unchanged` | Banned on ownership-deciding paths; A1a builds one O_EXCL reclaim-token primitive | The helper's own docstring says it is not a compare-and-swap |
+| A3: input bounds + heartbeat | Split: CLI floors and tz-aware `--now` go to A0.5 (ratified 30s settle and 5-min skew stay defaults, not floors, per Q4); heartbeat bounds stay in A3 | One tz-aware parser must exist before A1/A6 |
+| A5: Windows CI, doc drift ships with A5 | Windows CI becomes A0a/A0b (tests before the CAS code); doc drift becomes C0 | Evidence must exist before the code that flips it |
+| D3: defer all Tier C | M20, M21, M52, M35 pulled forward (C0, A7, A4a); M43/M44/M45/M16/M17/M19/M37/M42/M51 stay in V2-BACKLOG with reasons | Hard-delete (Invariant 6), live-seam demos, phantom seam |
+| B3: one PR | Split into B3a (inbound trust) and B3b (execution-time backstop) | B2/B5 inject untrusted text and must wait for B3a |
+| D2: read-only native surfaces | Kept; B2 gated on B3a; B5 scheduled digest added | A SessionStart surface alone does not close goal 2 |
+| D5: windows-latest only | Kept, plus L0 locality spike and V1 OneDrive soak | windows-latest proves NTFS, not OneDrive |
+| D1 / D6 | Kept unchanged (B1 and C0 run in parallel with Tier A, they have no shared-state writer) | |
+
 ## 2. Sequenced roadmap
 
 ### Phase P0: no gate, start now
 | ID | Title | Tier | Findings | Depends on |
 |---|---|---|---|---|
-| **A0** | Windows CI + characterization and strict-xfail tests | GREEN | M29, M30, M31, M32 (+ M01/M02 as strict-xfail) | none |
-| **A0.5** | CLI input floors + tz-aware `--now` | YELLOW (validation) | M03 (floor part), M21 (behaviour part only; M43 dedup stays deferred per D3) | A0 |
+| **A0a** | Windows CI leg, non-required (`continue-on-error`), plus inventory of baseline failures on Windows; `permissions: contents: read`; actions pinned by SHA (spec §11.1) | GREEN | M29, M30 (permissions + pins only; the `coverage --branch` floor is deferred to V2-BACKLOG) | none |
+| **A0b** | Characterization tests as **unittest** (`expectedFailure`, `subTest`, `mock.patch`) for M01/M02 and the `_exclusive_link` fallback; deterministic three-caller test for `assert_lease_held` (spec §11.2) | GREEN | M32, M31 (partial: lock-vs-task.lease and forced interleave), M01/M02 as expectedFailure | A0a |
+| *A0* | Umbrella name for A0a + A0b used by the dependency columns below | | | |
+| **A0.5** | CLI input validators + tz-aware `--now` (spec §11.3) | YELLOW (validation; touches the scheduled sweep CLI, so the §6 verification run applies) | M03 (invalid-value rejection only), M43 (naive `--now` behaviour only; helper dedup stays deferred) | A0b |
 | **C0** | Doc drift | GREEN | M47, M48, M49, M52 (demos get a live-path refusal banner) | none |
 | **L0** | Locality spike (read-only, Gabriel-executed Cowork probe) | GREEN (observation only; no writes, no code) | precondition for M01/M02 design; M46 | none |
 
@@ -68,26 +83,26 @@ Status: hardened. Every critical and high pre-mortem objection is resolved below
 | **S0** | Event schema: fixed reason vocabulary (`refs.reason` enum), MIGRATIONS entry, COWORK-BOOTSTRAP type-list sync | enables M08/M07/M23/M39 | A0, Q5 |
 | **A1a** | Shared ownership-transfer primitive (additive, not wired in); module-level no-op interleave hook that only tests patch; a test proving the default is a no-op and that no env or config activates it | M01, M02 design | A0, A0.5, AMD-0006 merged, L0 answer |
 | **A1b** | Drain lock adopts A1a + content-verified release (replaces the unconditional `os.unlink` at :1211) + pre-replace NDJSON re-hash guard | M01 | A1a, AMD-0004 merged |
-| **A1c** | Inbound validation, **shadow mode**; aggregated, sanitized rejection events emitted *after* the drain-lock release; skew-window timestamp check before sort; supervised `aaos readmit` | M08, M22 (M30 order part) | A1b, S0, census approval (Q6) |
+| **A1c** | Inbound validation, **shadow mode**; aggregated, sanitized rejection events emitted *after* the drain-lock release; skew-window timestamp check before sort; supervised `aaos readmit` | M08, M22 | A1b, S0, census approval (Q6) |
 | **A2** | `commit_state_change` retry: lease and state re-verified before each retry; elapsed-time budget; staged tmp retained for supervised replay; StateCommitFailed honoured by fail-task and the projection | M07, M06 (exclusive publish for the handoff write-once) | A0.5, S0, AMD-0004 |
-| **A3** | Heartbeat bounds (NaN/Inf/negative/future); `derived_at` freshness; one aggregated "liveness unknown: heartbeat chain not running" escalation per sweep | M09, M10, M14, M15, M23 | A0.5, S0, Q2 |
+| **A3** | Heartbeat bounds (NaN/Inf/negative/future); `derived_at` freshness; one aggregated "liveness unknown: heartbeat chain not running" escalation per sweep | M09, M10, M23 | A0.5, S0, Q2 |
 | **A6a** | Trivial guards: line-884 conditional archive, M04 expiry-aware no-op | M04, (M02 part) | A0.5, AMD-0006 |
 | **A6b** | `acquire_lease` and `assert_lease_held` decide from the lock (D1) via A1a; D4 mutation coverage | M02 / ADR-0006 D1-D2 | A1a, AMD-0006 |
-| **A6c** | Sweep re-match plus D3 ceiling via A1a; M11 unparseable or naive `expires` → `_escalate_corrupt` | M02, M11, M34 | A6b, S0 |
-| **A7** | Scoped unlink guard (`_discard_own_temp()` + `_release_drain_lock` as the only allowlisted callers, each tested to touch only its own artifact); `publish-contracts.py:270` archives instead of deleting; contract-drift manifest single-sourced | M35, M20 | A1b (so the release path is final) |
+| **A6c** | Sweep re-match plus D3 ceiling via A1a; M11 unparseable or naive `expires` → `_escalate_corrupt` | M02, M11, M33 (far-future TTL characterization) | A6b, S0 |
+| **A7** | Scoped unlink guard (`_discard_own_temp()` + `_release_drain_lock` as the only allowlisted callers, each tested to touch only its own artifact); `publish-contracts.py:270` archives instead of deleting; contract-drift manifest single-sourced | M20, M21 | A1b (so the release path is final) |
 
 ### Phase P2: comms (notification), trust, egress
 | ID | Title | Tier | Findings | Depends on |
 |---|---|---|---|---|
-| **B1** | `aaos inbox` / `aaos status` + health. **Metadata-only** (ids, from/to, state, age, counts). `validate.py` runs on every listed item and invalid items are marked. Import-graph test: never imports `archive_*`, `commit_state_change`, `emit_event` or `drain_event_spool`. Health checks: correct `_corrupt` path (`events/aaos-events.ndjson.pending/_corrupt/`, fixture on the real layout); `_drained` ⊆ NDJSON event_id reconciliation; OneDrive conflict copies of the NDJSON or drain lock in `events/` and `tasks/`; dehydrated or offline attributes; event-vs-state divergence (the ADR-0004 detector); Escalated events in the last window; log size and drain duration with a threshold. Cloud-provider errnos (WinError 362/389) map to exit 2. | GREEN | M36, M37, M32, M33 (detector), M31, M16 mitigation | A0 |
-| **B1s** | `expire-leases` SWEEP summary line | YELLOW | M33 | A0 |
+| **B1** | `aaos inbox` / `aaos status` + health. **Metadata-only** (ids, from/to, state, age, counts). `validate.py` runs on every listed item and invalid items are marked. Import-graph test: never imports `archive_*`, `commit_state_change`, `emit_event` or `drain_event_spool`. Health checks: correct `_corrupt` path (`events/aaos-events.ndjson.pending/_corrupt/`, fixture on the real layout); `_drained` ⊆ NDJSON event_id reconciliation; OneDrive conflict copies of the NDJSON or drain lock in `events/` and `tasks/`; dehydrated or offline attributes; event-vs-state divergence (the ADR-0004 detector); Escalated events in the last window; log size and drain duration with a threshold. Cloud-provider errnos (WinError 362/389) map to exit 2. | GREEN | M36, M37, M16 (mitigation), M23 (escalation visibility) | A0b |
+| **B1s** | `expire-leases` SWEEP summary line | YELLOW | M41 | A0b |
 | **B3a** | Inbound trust: `validate.py` mandatory on inbound tasks and handoffs; untrusted-content tagging in the B1 renderer; resolved-path scope matching (casefold + junction resolution, Windows parity test); receiver artifact-hash verify | YELLOW | M25, M28, M26 | B1, A1c |
-| **B2** | SessionStart `additionalContext`: metadata-only before B3a; after B3a, free text only inside explicit untrusted delimiters and only after the A4a matcher has screened it. Skipped when `agent_type` marks a subagent. FileChanged debounced and keyed to new handoff ids, not mtime. Explicit short timeout, fail-open. | YELLOW (blast-radius: project `.claude/settings.json`) | M32 | B1, B3a, A4a (matcher) |
-| **A4a** | Notion egress gate: screen the **entire serialized payload** (every string, including task_id, project_id, owner and title) with the **same** matcher `confidentiality-guard.py` uses (imported, or vendored with a parity test); NFKC + casefold + separator collapse; titles **omitted or hashed by default** (verbatim is opt-in, Q7); exit 2 on any match; validator rejects new task_ids that match a roster term. Test decodes the captured body and walks every string; fixtures include diacritics, case, hyphen/underscore/space variants and split rich-text runs. REFUTE includes address, LLC-name and codename variants. | RED | M27 | A0, Q7 |
+| **B2** | SessionStart `additionalContext`: metadata-only before B3a; after B3a, free text only inside explicit untrusted delimiters and only after the A4a matcher has screened it. Skipped when `agent_type` marks a subagent. FileChanged debounced and keyed to new handoff ids, not mtime. Explicit short timeout, fail-open. | YELLOW (blast-radius: project `.claude/settings.json`) | M37 | B1, B3a, A4a (matcher) |
+| **A4a** | Notion egress gate: screen the **entire serialized payload** (every string, including task_id, project_id, owner and title) with the **same** matcher `confidentiality-guard.py` uses (imported, or vendored with a parity test); NFKC + casefold + separator collapse; titles **omitted or hashed by default** (verbatim is opt-in, Q7); exit 2 on any match; validator rejects new task_ids that match a roster term. Test decodes the captured body and walks every string; fixtures include diacritics, case, hyphen/underscore/space variants and split rich-text runs. REFUTE includes address, LLC-name and codename variants. | RED | M27, M35 (contract test against a real HTTP listener, not a patched urlopen) | A0b, Q7 |
 | **B4** | Terminal-state exits (unblock/retry/archive) through `commit_state_change` with events; **sole owner of the archive transition** (flag in place, files stay in `tasks/` unless Q10 ratifies a move); every reader of `tasks/` enumerated (lease-task, expire-leases, complete-task no-op, fail-task, post-handoff, COWORK-BOOTSTRAP recipes) with a test that archived tasks are ignored; retryable `--blocker` (M39); break-glass only past expiry or with in-turn confirmation, via A1a + a LeaseContested/Escalated pair, REFUTE | YELLOW | M39, M40, M05, M50 | A2, A6c, S0 |
-| **A4b** | Projection: age in title, STALE in title, correct staleness (newest input; true when there are no inputs), queue columns (expiry, age, verdict); terminal states excluded **by filter**; versioned child page plus a pointer block with a run-id marker; old pages archived, never deleted; live publish needs in-turn confirmation | RED (egress) | M12, M13, M15 (M24 partial), M41 | A4a, B4 |
+| **A4b** | Projection: age in title, STALE in title, correct staleness (newest input; true when there are no inputs), queue columns (expiry, age, verdict); terminal states excluded **by filter**; versioned child page plus a pointer block with a run-id marker; old pages archived, never deleted; live publish needs in-turn confirmation | RED (egress) | M12, M13, M14, M15 | A4a, B4 |
 | **B5** | Daily digest to `ggoldberg@oxfordra.net` only: a one-line result **every day**, including "healthy, N checked"; exit 2 or a missed run is an alert; "unread" is derived purely from events (no cursor file); idempotency test; registered via `register-scheduled-task` as a **local-file CC-fleet** task, verified in automation-health-monitor on a supervised first run | YELLOW (internal send, pre-authorized by routing canon; registration supervised) | M36 (notification) | B1, B3a, A3, A1c, Q3 |
-| **F0** | Health-loop metrics: opaque ids, counts and enum reasons only (no titles, detail or raw slugs; slugs hashed); A4a matcher fails closed on every proposal and digest; golden CI test with a roster fixture embedded in ids and details; event_log.md side only (per AMD-0004 / Q8) and declared a writer | YELLOW | M36 (ADR-0004 mirror) | B1, A4a, Q8 |
+| **F0** | Health-loop metrics: opaque ids, counts and enum reasons only (no titles, detail or raw slugs; slugs hashed); A4a matcher fails closed on every proposal and digest; golden CI test with a roster fixture embedded in ids and details; event_log.md side only (per AMD-0004 / Q8) and declared a writer | YELLOW | M24 (ADR-0004 mirror, event_log.md side only per Q8) | B1, A4a, Q8 |
 
 ### Phase P3: supervised, RED
 | ID | Title | Depends on |
@@ -98,7 +113,9 @@ Status: hardened. Every critical and high pre-mortem objection is resolved below
 | **B7** | Supervised CC-fleet consumer that leases eligible claude-code tasks in a narrow allowlisted scope and posts the return handoff. Success = measured handoff-to-action latency | B3b, Q15 |
 
 ### Deferred (V2-BACKLOG, each with a reason)
-- M43 helper dedup, M44 and M45 (god-module split, per D3); M17, M19, M37 perf; M42; M51.
+- M43 helper dedup (beyond the A0.5 behaviour part), M44 and M45 (god-module split, per D3); M17, M19 perf; M42; M51.
+- **M18 (fixed 30s settle on uncontended acquisitions): dropped, report-only.** The 30s settle is ratified (ADR-0003) and ADR-0006 leaves it out of scope; changing it is an ADR-0003 amendment with no safety gain, so it is not planned.
+- **M34 (failure-injection matrix re-runs other classes and asserts hard-coded counts):** deferred to V2-BACKLOG; A0b's `expectedFailure` tests and A0.5's grep test assert invariants directly, so the matrix is not relied on. Reopen if the matrix is reused as a gate.
 - **M16 log segmentation stays deferred only if Q13 says so.** The B1 conflict-copy and reconciliation detectors are its mitigation. Reopen trigger: NDJSON > 5 MB, p95 drain > 2 s, or any conflict copy detected.
 - Cloud-scheduled Cowork writer (from B6).
 - Event-emitting hooks (D6).
@@ -133,7 +150,7 @@ Status: hardened. Every critical and high pre-mortem objection is resolved below
 - Before each retry, re-verify that the lease is held and the state file is byte-unchanged; abort if not. This removes the lost-update hazard.
 - The retry budget is elapsed time (tested against simulated multi-second sharing violations), not a count.
 - On exhaustion, the staged tmp is kept for supervised replay and `Escalated(reason=StateCommitFailed, refs.event_id=<compensated>)` is emitted. fail-task and project-notion treat the referenced event as superseded for state derivation. The B1 divergence detector reports any remaining mismatch as needs-action.
-- A0 lands the strict-xfail clobber test first.
+- A0b lands the unittest `expectedFailure` clobber test first.
 
 ## 6. YELLOW substrate deploy procedure (record in OPERATIONS.md, used by A1b, A1c, A2, A6*, B4)
 1. Forward-compatible filenames, or an enumeration-tolerance change merged one PR earlier.
@@ -151,49 +168,59 @@ Status: hardened. Every critical and high pre-mortem objection is resolved below
 - Merge gate: a bot check is never a verdict. Blast-radius PRs (B2, B3b settings and hooks) need an adversarial subagent pass.
 
 ## 8. HUMAN-RATIFICATION-REQUIRED backlog and decision ballot
+**Status 2026-10-17: Q1-Q9 ratified (option A each). Q10-Q15 remain open until the L0 spike returns.** Ratifying Q1-Q9 does not ratify the RED items listed at the end of this section; each still needs its own in-turn confirmation.
 Each item is multiple choice with the recommended option first; Gabriel answers in chat. R0a = Q1-Q9 (needed for Phase 1). R0b = Q10-Q15 (after L0).
 
 **Q1 (sequencing): first implementation PRs**
+**RATIFIED 2026-10-17: option (A): A0 Windows CI + tests, then A0.5 input floors.**
 - (A) A0 Windows CI + tests, then A0.5 input floors **(Recommended)**: the tests that prove the CAS exist before the CAS code; no ADR touched.
 - (B) A1 drain CAS directly: fastest on M01, but designed before the L0 locality answer and the ADR amendments, which the pre-mortem rejected.
 - (C) A4a Notion gate first: closes egress sooner, but it is RED and needs Q7 before it can start.
 
 **Q2 (DQ5): heartbeat-absent behaviour**
+**RATIFIED 2026-10-17: option (A): one aggregated liveness-unknown escalation per sweep.**
 - (A) One aggregated "liveness unknown" escalation per sweep, surfaced in B1 and B5 **(Recommended)**: no false positives or false negatives, and it has a reader.
 - (B) Classify as NoSignal silently: quieter, but a truly dead holder is never escalated.
 - (C) Keep per-reclaim DeadAgent: status quo, 100% false-positive noise.
 
 **Q3 (DQ10): digest policy**
+**RATIFIED 2026-10-17: option (A): one-line daily digest including healthy days.**
 - (A) A one-line daily result every day, including "healthy, N checked"; a missed run or exit 2 alerts **(Recommended)**: dead-man coverage.
 - (B) Send only on breach: less mail, but silence is indistinguishable from a dead task.
 - (C) No digest; B1 on demand only: no loop closure at all.
 
 **Q4: ratified settle and skew floors in CLI input validation**
+**RATIFIED 2026-10-17: option (A): reject invalid values only; ratified 30s/5-min stay defaults.**
 - (A) Reject only invalid values (ttl ≥ 1, skew ≥ 0, settle ≥ 0); the ratified 30s and 5min stay defaults, not floors **(Recommended)**: closes M03's negative-skew attack with no ADR-0003 amendment, and tests keep `--settle-sec 0`.
 - (B) Enforce the ratified values as floors on foreign-lease judging (5-min skew floor): stronger, but it is an ADR-0003/0006 amendment and breaks fast tests without a test-only override.
 - (C) No floors: leaves M03 open.
 
 **Q5: event-schema extension for reasons**
+**RATIFIED 2026-10-17: option (A): enumerated `refs.reason` event field (S0).**
 - (A) Add an enumerated `refs.reason` field, with a MIGRATIONS entry and COWORK-BOOTSTRAP sync (S0) **(Recommended)**: one vocabulary, closed schema preserved.
 - (B) Encode reasons in `detail` (max 200 characters): no schema change, but free-text drift and an injection surface.
 - (C) New event types per reason: fine-grained, but every PR edits the enum.
 
 **Q6: census copy of the live NDJSON, pending/ and _drained/ (read-only, copied to scratch, deleted to `/archive/` after)**
+**RATIFIED 2026-10-17: option (A): one supervised read-only census copy before A1c (the copy itself still needs in-turn confirmation when A1c starts).**
 - (A) Approve one supervised copy before A1c **(Recommended)**: sizes the false-positive rate before anything is quarantined.
 - (B) Skip the census and rely on shadow mode only: no live-data copy, but sizing comes only after deploy.
 - (C) Neither: unbounded risk of quarantining legitimate in-flight events.
 
 **Q7 (DQ7): Notion title policy (RED egress)**
+**RATIFIED 2026-10-17: option (A): omit/hash titles by default, verbatim opt-in per project.**
 - (A) Omit or hash titles by default; verbatim only per-project opt-in; full-payload screen fails closed **(Recommended)**: a gap in roster coverage cannot leak anything.
 - (B) Verbatim titles with the roster screen and `[CONFIDENTIAL]` substitution: more readable, but aliases, addresses and LLC names escape substring matching.
 - (C) Pause Notion publish until B4/A4b: zero egress risk, but no projection.
 
 **Q8: ADR-0004 milestone mirror (event_log_ref)**
+**RATIFIED 2026-10-17: option (A): recorded deviation: event_log.md side only, NDJSON mirror deferred to V2.**
 - (A) Record a surfaced deviation: F0 writes only the event_log.md side; the paired NDJSON milestone is deferred to V2 with its reason **(Recommended)**: no new seam write.
 - (B) Route the mirror event through the normal emit path now: full ADR-0004 compliance, but a new seam writer that needs its own REFUTE.
 - (C) Drop the mirror requirement from ADR-0004: simplest, but it is an amendment removing an audit link.
 
 **Q9 (DQ14): backstop scope for B3b**
+**RATIFIED 2026-10-17: option (A): project-scoped lease-gated hook; global settings untouched.**
 - (A) Project-scoped hook, active only while the session holds a live lease (adapter env var + lock read); global settings untouched **(Recommended)**: no self-lockout, no blast-radius change to `~/.claude`.
 - (B) Also install globally via a supervised `~/.claude/settings.json` change: covers seam work from other cwds, but touches blast-radius config.
 - (C) No hook; rely on B3a validation only: less machinery, but no execution-time defense.
@@ -275,6 +302,83 @@ RED items needing Gabriel's ratification: AMD-0003, AMD-0004, AMD-0006, AMD-NG, 
 | B1 GREEN with writer path | low | SWEEP line split to B1s; import-graph test |
 | B6 tier and NON-GOALS fit | low | RED build; desktop-only scope; cloud writes to V2 |
 | F0 `_corrupt` path / ADR-0004 mirror | low | Path fixed with a real-layout fixture; Q8 |
+
+
+## 11. A0 / A0.5 PR specifications (corrected; resolves validation defects 1-9, 10, 11, 14)
+Shared rules for A0a, A0b and A0.5:
+- **Runner is unittest.** CI runs `python -m unittest discover -s tests -p "test_*.py"` and `requirements.txt` holds only `jsonschema`. No pytest, no new dependency, no change to how the 267 baseline tests run or to the `testsRun` count wrappers in `tests/test_failure_injection_matrix.py`. Use `@unittest.expectedFailure` (an unexpected success fails the run, which is the strict behaviour wanted), `subTest` for parametrization, `unittest.mock.patch` for `os.*` injection, and a `setUp`/`addCleanup` guard that patches `seam_root`/`DEFAULT_SEAM_ROOT` and fails the test if the live default seam is ever resolved.
+- **Finding ids are M-ids from `confirmed-findings.json`**, never audit rank numbers. (The first draft of A0/A0.5 mixed them; the same slip was also corrected in the §2 rows for A1c, A3, A6c, A7, B1, B1s, B2, A4a, A4b and F0.)
+
+### 11.1 A0a: Windows CI leg (GREEN, one small PR)
+- `.github/workflows/ci.yml`: matrix `os: [ubuntu-latest, windows-latest]` x `python-version: ['3.11', '3.13']` (the existing 2x2 versions are kept; a 3.13-only Windows leg is acceptable if runtime is a concern). The Windows legs run with `continue-on-error: true` and are **not a required check**. Add top-level `permissions: contents: read`; pin `actions/checkout` and `actions/setup-python` by full commit SHA with a tag comment.
+- Inventory: the PR body lists every baseline test that fails on Windows, each with a per-test reason and a filed issue. **No blanket marking.** A test is marked `expectedFailure` on Windows only with its own issue and reason. The Windows legs become required only after they are green.
+- Not in this PR: a `coverage --branch` floor (M30 remainder). Written into V2-BACKLOG with the reason: it needs a coverage dependency and a baseline measurement first.
+- Revert = revert one PR.
+
+### 11.2 A0b: characterization tests (GREEN; `tests/` only plus one OPERATIONS.md paragraph)
+New modules `tests/test_windows_fs_semantics.py` and `tests/test_drain_lock_interleaving.py`, all unittest, all in temp seam roots.
+1. **`_exclusive_link` fallback (M32).** The fallback lives in `_exclusive_link` (`tools/_aaos_common.py:704-708`), which on a non-`FileExistsError` `OSError` calls `_exclusive_create` (`:669`), whose docstring documents a zero-byte window. Tests:
+   - Patch `os.link` to raise `EPERM`: assert the dest is published with the exact bytes, and a `FileExistsError` collision still propagates (passes on HEAD).
+   - Zero-byte window: a deterministic hook between the O_EXCL create and the write (no polling reader thread, so it cannot flake) observes the dest at length 0. Marked `@expectedFailure` against the invariant "never observable empty"; this documents the defect and flips when M32 is fixed.
+   - Characterize `_exclusive_publish` (`:1052-1090`) raising `OSError` when hardlinks are refused (the drain lock could then never be acquired). Recorded as a newly documented gap, with a one-line decision note on whether `_exclusive_publish` needs a fallback at all.
+2. **M31 partial.** Deterministic three-caller interleave through `assert_lease_held` with `task.lease` disagreeing with the lock file, forced by `os.*` patching rather than an N-thread barrier (barriers are probabilistic, the weakness M31 names). The remainder of M31 (full ADR-0006 verification suite) is carried by A6b and listed in the A6b DoD.
+3. **M01 / M02, two tests each (resolves defect 4 and 11).**
+   - *Invariant test (implementation-independent):* two real `drain_event_spool` calls driven through a seam hook at the judge-to-swap boundary; assert the union `NDJSON ∪ pending ∪ _drained` holds every event_id and a successor's lock survives. `@expectedFailure` on HEAD; **A1b's DoD requires flipping it to a plain pass**.
+   - *Characterization test of the current window:* a **path-filtered, reentrancy-guarded** wrapper around `os.replace`: it fires only when `src` is the drain-lock path and `dst` is under `events/_archive`, nested calls (the fold, `atomic_write`, state commits) use the real function, it is restored in `finally`, and the test asserts both the hook fire count and the call-site filter. **A1b must rewrite or remove this test.**
+   - Same pair for the unconditional release (`os.unlink` at `:1211`) deleting a successor's lock, and for the M02 sweep re-match.
+4. `docs/OPERATIONS.md`: one paragraph: CI proves NTFS/Win32 semantics only; OneDrive guarantees are UNVERIFIED until V1.
+- Written-first evidence: the M01/M02 tests are committed first and shown failing on HEAD (run without the marker, output in the PR body); then marked. Tests expected to pass on HEAD (the `EPERM` publish/collision cases) are asserted to pass on both OSes; a Windows-only failure is a newly discovered defect, filed as an `expectedFailure` plus an issue, never patched in this PR.
+- REFUTE focus: the hook actually fired (assert it); no `expectedFailure` can pass for the wrong reason (assert the specific invariant, not "raises"); the live seam is never resolved.
+- Size: roughly 250-400 test lines plus a paragraph; one review.
+
+### 11.3 A0.5: CLI input validators and tz-aware `--now` (YELLOW, validation only)
+- `tools/_aaos_common.py`: add `parse_cli_now(now_str, flag="--now")`: empty means `datetime.now().astimezone()`; otherwise call the existing tz-aware `_parse_iso_dt` (`:443`) and re-raise `CorruptStateError` as `UsageError`. No other helper consolidation (M43 dedup stays deferred).
+- The seven CLIs' `_resolve_now` bodies become a call to `parse_cli_now`. **`expire-leases.py` is an explicit change, not a one-liner:** `_resolve_now(args.now)` is called at `:104`, outside the `try` whose `except aaos.UsageError` (`:232`) returns exit 2, so a naive `--now` would escape as a traceback with exit 1. Move the now-resolution inside the `try` (or catch `UsageError` around it).
+- argparse type validators: `lease-task --ttl-min` int >= 1; `lease-task` and `expire-leases --skew-min` int >= 0; `lease-task --settle-sec` finite float >= 0. Only invalid values are rejected; the ratified 30s settle and 5-min skew stay defaults (Q4-A), so there is no ADR-0003/0006 amendment and `--settle-sec 0` keeps working in tests. The `ttl >= 1` floor sits alongside the ADR-0006 D3 ceiling (`LEASE_TTL_CAP`, in the conforming-changes table) without implementing it; the validator must stay compatible with that future cap.
+- `docs/MIGRATIONS.md` entry: "CLI rejects naive `--now` and zero/negative TTL, negative skew/settle, NaN/Inf from <commit>".
+- Findings: **M03** (invalid values; the negative-skew attack on a live foreign lease) and **M43 (behaviour part only)**. M11 stays owned by A6c; M33 (far-future TTL characterization) is added to A6c only when its test exists.
+- Tests (written first, failing on HEAD), unittest via the existing `_tool_loader` subprocess pattern on a temp seam:
+  - naive `--now` through each of the 7 CLIs (`subTest`): exit 2 and `USAGE ERROR` on stderr;
+  - `lease-task --skew-min -5`: exit 2 and a live foreign lock fixture is byte-unchanged and no lock file is created;
+  - `--ttl-min 0` and `-1`; `--settle-sec -1`, `nan`, `inf`: exit 2 (argparse's own usage output asserted separately, since it is not `UsageError` text);
+  - positive controls: aware `--now`, `--settle-sec 0`, `--skew-min 0`, defaults behave as before.
+- REFUTE focus: no path reaches `datetime.fromisoformat` outside `_parse_iso_dt` (a grep test); no argparse default or env var bypasses a validator; and whether exit 2 breaks a documented recipe or the sweep command line.
+- **Cutover (defect 14):** A0.5 changes the `ora-aaos-expire-leases` sweep CLI contract, so it follows §6 in reduced form. Before merge: attach the read-only grep of `COWORK-BOOTSTRAP.md`, `OPERATIONS.md`, `CODE-ADAPTER.md` and the scheduled task's `SKILL.md` for `--now`, `--skew-min`, `--ttl-min`, `--settle-sec`. After merge: the MIGRATIONS entry plus **one supervised verification run of the sweep** is a done-criterion. Pause/resume of the task is required only if the grep finds a non-default invocation.
+- Depends on A0b. Size: about seven call sites plus roughly 30 lines of helpers, plus tests; one review.
+
+## 12. Substrate-health feedback loop (design only; resolves validation defect 13)
+Closed loop: **measure -> threshold -> proposal addressed to Gabriel -> acknowledgement or closure**. It never auto-applies anything and never builds or registers a task in this plan; B1 supplies the measurements and B5 the delivery.
+| Metric (read-only, computed from the event log and B1 health checks) | Window | Initial threshold (proposal; tuned from the A1c census and the first soak) |
+|---|---|---|
+| Lease reclaims per day | 7 days | > 3x the trailing 4-week median, or any day with > 5 |
+| Aggregated "liveness unknown" escalations (Q2-A) | per sweep | any two consecutive sweeps |
+| Drain steals / contested acquisitions | 7 days | any steal; > 2 contested acquisitions |
+| Shadow-mode `InboundInvalid` rejections (A1c) | per drain | any rejection after cutover; > 0 persisting 3 days |
+| `_drained` vs NDJSON event_id reconciliation gap (B1) | each B1 run | any non-zero gap |
+| OneDrive conflict copies in `events/` or `tasks/` (B1) | each B1 run | any |
+| NDJSON size / p95 drain duration | daily | > 5 MB or > 2 s (the M16 reopen trigger) |
+- **Computed by:** B1 (read-only, metadata-only; never imports a writer). **Delivered by:** the B5 daily digest to `ggoldberg@oxfordra.net` only.
+- **Breach output:** a proposal line in the digest naming the metric, value, threshold, and the plan item it would reopen (for example, M16 segmentation, or reopening the CAS design). It is addressed to Gabriel; applying anything stays a supervised action.
+- **Closure state:** a breach is recorded as an event (`Escalated`, enumerated reason, counts only). It stays "open" in the next digests until a later B1 run shows the metric back under threshold or Gabriel records a ratified waiver in V2-BACKLOG. Unacknowledged breaches repeat daily.
+- **Confidentiality:** telemetry holds opaque ids, counts and enum reasons only (no titles, `detail`, or raw slugs; slugs hashed). The A4a matcher fails closed on every digest and proposal (F0 golden test).
+- **Done-definition for building it later:** a breach fixture produces a digest proposal; a cleared fixture closes it; a second run is idempotent.
+
+
+### 10a. Resolution map (added after Gabriel ratified Q1-Q9)
+| Defect (addendum order) | Resolved in |
+|---|---|
+| High: A0 test aimed at wrong code / wrong HEAD expectation (also the duplicate "M31/M32 fallback describes code that does not exist") | §11.2 item 1 |
+| High: finding-id traceability (also the duplicate "wrong ids in A0.5") | §2 row corrections, §11 shared rules, §11.3 |
+| Medium + High: pytest vs unittest (two entries) | §11 shared rules |
+| Medium: `expectedFailure` tied to `os.replace` at `:1187` / process-wide patch (two entries) | §11.2 item 3 |
+| Medium: Windows baseline has never run | §11.1 (non-required leg first, inventory, per-test reasons) |
+| Medium: A0 drops parts of M30/M31 | §2 A0a/A0b rows, §11.1, §11.2 item 2 |
+| Medium: "supersedes" the draft spec | Header, §1a delta table |
+| Medium: no visible closed-loop feedback | §12 |
+| Low: `expire-leases` `_resolve_now` outside the `try` | §11.3 |
+| Low: A0.5 skips the cutover procedure | §11.3 cutover bullet |
+
+All 14 entries below remain as the historical record.
 
 
 ---
