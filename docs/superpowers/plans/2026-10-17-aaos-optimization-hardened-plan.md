@@ -415,3 +415,25 @@ Apply these corrections to A0 / A0.5 before execution. Several duplicate each ot
   - Fix: Neither tierATargets nor the plan head nor residualRisks describes the measure -> threshold -> stop-for-Gabriel proposal loop that the Phase-3 flywheelDesign required. The only traces are 'automation-health-monitor is the detector' and M16 size/drain-duration thresholds that 'only trigger a reopen', both detect-only or write-only. Add a concrete section that defines: metrics (lease reclaim rate, DeadAgent escalations, drain contention or steals, shadow-mode rejected inbound events, the B1 _drained reconciliation gap), each with a numeric threshold and window; who computes them (read-only); the breach output (a proposal artifact or event addressed to Gabriel that never auto-applies); and an acknowledgement or closure state, so the loop closes. Also state that the telemetry never persists confidential terms.
 - **LOW**: A0.5 changes the scheduled sweep's CLI contract but skips the YELLOW cutover procedure
   - Fix: A0.5 modifies expire-leases.py, the ora-aaos-expire-leases sweep, to newly reject inputs with exit 2. §6 applies the cutover procedure to any PR changing sweep behaviour. A0.5 waives it on the strength of a pre-flight grep that has not been run yet. Either attach the grep evidence of the scheduled task's actual command line before classifying the cutover as not required, or keep the MIGRATIONS entry plus a supervised verification run of the sweep after merge as a done-criterion.
+
+## 13. L0 locality findings (read-only, 2026-10-17)
+Evidence gathered without any write to the seam or any Cowork session: the live seam's own artifacts from the one past Cowork round-trip (2026-07-10), and structure-only fields (no titles or content) of this machine's Cowork session metadata.
+
+**Established**
+1. **Cowork does not run on the seam's NTFS volume directly. It runs locally in a per-session VM.** All 529 recorded local Cowork sessions (202 interactive, 327 scheduled) carry a `vmProcessName` and `hostLoopMode: true`; none is cloud-hosted. This reverses the draft precondition "all seam writers share one NTFS volume": Code writes natively on NTFS, Cowork writes through a VM folder mount of the OneDrive-synced host folder.
+2. **The seam was reached through a mount.** The 2026-07-10 session mounted `Claude_Workspace` and `C:\Users\Owner\AAOS`, and its own handoff says Probe X ran "path-translated to this session's mount" inside a "Cowork sandbox" (a session-local pip environment). Result: `MODE=SAFE-BY-HAND`, `CONTRACTS_SOURCE=git-tree`.
+3. **Scheduled Cowork sessions are local too** (327 of 327 have a VM process and a local session file), consistent with the standing note that both fleets fire only while the Desktop app is open. This is the pre-October-6 local mode; the newer cloud-scheduled mode cannot reach local paths and is out of scope (B6).
+4. **The Desktop app classifies OneDrive folders as `cloud-sync`** (vs `local`) in `resolvedFolderKinds`, so the mount layer knows the folder is sync-managed.
+5. **Cowork stamps UTC (`Z`), Code stamps a local offset** (seen in `aaos-events.ndjson`). Both are timezone-aware, so correctness holds, but any filename or lexical-ordering assumption across surfaces is unsafe (M22).
+6. **The Cowork leg is stale.** Only 6 of 529 sessions ever mounted `Claude_Workspace`; the last AAOS-seam session was 2026-07-10. Nothing since has exercised cross-surface locking.
+
+**Not established (cannot be read from metadata)**
+- The mount mechanism (virtiofs, 9p, or SMB-like) and whether `O_EXCL` create, `os.link`, and rename-over-existing are atomic and immediately visible across it.
+- Whether a Cowork write is visible at the host path synchronously, and in what order relative to OneDrive sync.
+
+These need either a live read-only Cowork probe (mount type, `stat` inode and link count, clocks) or the V1 soak (writes, distinct project id).
+
+**Design consequences**
+- AMD-0003's locality precondition is rewritten: the CAS primitive (A1a) must be correct for **Code on NTFS vs Cowork over a VM mount**, and may not assume NTFS atomicity on the Cowork side. Until V1 says otherwise, treat Cowork as an untrusted-atomicity writer: it must never hold the drain lock or a lease-reclaim token. It writes spool files and handoffs only, which is already the Recipe 1/2 contract.
+- B1's conflict-copy and `_drained` reconciliation detectors matter more: cross-surface sync is the likeliest source of conflict copies.
+- The Q14 recommendation strengthens: option A (one desktop Cowork probe), with Code-only contenders as the fallback.
