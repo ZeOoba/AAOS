@@ -35,7 +35,7 @@ from __future__ import annotations
 
 import argparse
 import sys
-from datetime import datetime, timezone
+from datetime import timezone
 
 import _aaos_common as aaos
 
@@ -49,12 +49,7 @@ def _add_common_args(parser: argparse.ArgumentParser) -> None:
 
 
 def _resolve_now(now_str):
-    if now_str:
-        try:
-            return datetime.fromisoformat(now_str)
-        except ValueError as exc:
-            raise aaos.UsageError(f"--now: unparseable ISO-8601 datetime {now_str!r}: {exc}") from exc
-    return datetime.now().astimezone()
+    return aaos.parse_cli_now(now_str)
 
 
 def _parse_kv_args(tokens, keys):

@@ -10,3 +10,13 @@ AAOS schemas carry a `protocol_version` field (currently `"1.0"` in all five sch
 
 ### 1.0 — 2026-07-09 (initial)
 Initial release of all five schemas (`agent-registry`, `task`, `handoff`, `event`, `heartbeat`) as part of AAOS Phase 1. No prior version exists; nothing to migrate from.
+
+## CLI behaviour changes (no protocol_version bump)
+
+### 2026-10-17 -- A0.5: CLI input validation (audit M03, M43 behaviour part)
+The queue CLIs now reject invalid inputs with exit 2 *before* any lock, lease, event or state is touched:
+
+- `--now` must carry a UTC offset in all seven queue CLIs (`lease-task`, `expire-leases`, `complete-task`, `create-task`, `emit-event`, `fail-task`, `post-handoff`). A naive value (e.g. `2026-07-09T12:00:00`) now exits 2 with `USAGE ERROR: --now: ...`; previously it was accepted and compared against timezone-aware datetimes. `expire-leases` also now reports a bad `--now` as exit 2 instead of an uncaught exception.
+- `lease-task --ttl-min` must be an integer >= 1; `lease-task` and `expire-leases` `--skew-min` an integer >= 0; `lease-task --settle-sec` a finite number >= 0 (NaN and Inf rejected). A negative `--skew-min` previously let a contender reclaim a still-live foreign lease.
+- The ratified defaults are unchanged (45-minute TTL, 5-minute skew, 30s settle) and are defaults, not floors: `--settle-sec 0` and `--skew-min 0` remain valid.
+- Callers to check: any recipe or scheduled-task command line that passes a naive `--now` or a zero/negative value. The scheduled `ora-aaos-expire-leases` sweep runs `expire-leases.py --project ora-ops` with defaults only, so it is unaffected; verify with one supervised run after merge.

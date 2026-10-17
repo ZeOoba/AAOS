@@ -48,7 +48,6 @@ from __future__ import annotations
 
 import argparse
 import sys
-from datetime import datetime
 
 import _aaos_common as aaos
 
@@ -60,12 +59,7 @@ def _add_common_args(parser: argparse.ArgumentParser) -> None:
 
 
 def _resolve_now(now_str):
-    if now_str:
-        try:
-            return datetime.fromisoformat(now_str)
-        except ValueError as exc:
-            raise aaos.UsageError(f"--now: unparseable ISO-8601 datetime {now_str!r}: {exc}") from exc
-    return datetime.now().astimezone()
+    return aaos.parse_cli_now(now_str)
 
 
 def build_arg_parser() -> argparse.ArgumentParser:
@@ -73,7 +67,7 @@ def build_arg_parser() -> argparse.ArgumentParser:
         prog="expire-leases.py", description="Sweep locks/ and reclaim stale AAOS leases."
     )
     parser.add_argument("--dry-run", action="store_true")
-    parser.add_argument("--skew-min", type=int, default=5)
+    parser.add_argument("--skew-min", type=aaos.nonneg_int, default=5)
     _add_common_args(parser)
     return parser
 
@@ -101,9 +95,8 @@ def _escalate_corrupt(project, root, resolved_now, entry, dry_run):
 
 def main(argv=None) -> int:
     args = build_arg_parser().parse_args(argv)
-    resolved_now = _resolve_now(args.now)
-
     try:
+        resolved_now = _resolve_now(args.now)
         aaos.require_seam_reachable(args.seam_root)
         if not args.dry_run:
             # Gated behind dry-run (Finding 4, adversarial review): draining

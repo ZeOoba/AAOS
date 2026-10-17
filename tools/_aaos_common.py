@@ -32,6 +32,7 @@ and keeps both import orders safe.
 """
 from __future__ import annotations
 
+import argparse
 import dataclasses
 import enum
 import fnmatch
@@ -453,6 +454,57 @@ def _parse_iso_dt(value) -> datetime:
     if dt.tzinfo is None:
         raise CorruptStateError(f"naive datetime not allowed (ambiguous timezone): {value!r}")
     return dt
+
+
+def parse_cli_now(now_str, flag: str = "--now") -> datetime:
+    """Resolve a CLI `--now` value. Empty/None means the real clock (timezone-aware).
+
+    Otherwise the value must be an ISO-8601 datetime WITH a UTC offset: a naive value is rejected
+    with UsageError (exit 2) instead of being silently compared against timezone-aware datetimes
+    (design section 0.3 -- never assume UTC). The seven queue CLIs share this single parse path;
+    `_parse_iso_dt` is the only place `datetime.fromisoformat` is called."""
+    if not now_str:
+        return datetime.now().astimezone()
+    try:
+        return _parse_iso_dt(now_str)
+    except CorruptStateError as exc:
+        raise UsageError(f"{flag}: {exc}") from exc
+
+
+# argparse `type=` validators for CLI numeric flags (audit M03). They reject only INVALID values;
+# the ratified defaults (30s settle, 5-minute skew, 45-minute TTL) are defaults, never floors.
+
+def positive_int(text: str) -> int:
+    """int >= 1 (a zero or negative TTL would mint an already-expired lease)."""
+    try:
+        value = int(text)
+    except ValueError:
+        raise argparse.ArgumentTypeError(f"expected an integer >= 1, got {text!r}") from None
+    if value < 1:
+        raise argparse.ArgumentTypeError(f"must be >= 1, got {value}")
+    return value
+
+
+def nonneg_int(text: str) -> int:
+    """int >= 0 (a negative skew makes a LIVE foreign lease look expired and reclaimable)."""
+    try:
+        value = int(text)
+    except ValueError:
+        raise argparse.ArgumentTypeError(f"expected an integer >= 0, got {text!r}") from None
+    if value < 0:
+        raise argparse.ArgumentTypeError(f"must be >= 0, got {value}")
+    return value
+
+
+def finite_nonneg_float(text: str) -> float:
+    """finite float >= 0 (rejects negative, NaN and +/-Inf)."""
+    try:
+        value = float(text)
+    except ValueError:
+        raise argparse.ArgumentTypeError(f"expected a number >= 0, got {text!r}") from None
+    if value != value or value in (float("inf"), float("-inf")) or value < 0:
+        raise argparse.ArgumentTypeError(f"must be a finite number >= 0, got {text!r}")
+    return value
 
 
 # ---------------------------------------------------------------------------
