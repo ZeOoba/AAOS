@@ -1365,17 +1365,30 @@ def _read_pending_text(p: Path):
             return "transient", exc
 
 
-def _within_quarantine_grace(p: Path) -> bool:
-    """True while a pending file's mtime is within QUARANTINE_GRACE_SECONDS of the wall clock (either
-    side, to tolerate cross-machine clock skew on a synced file). The wall clock is deliberate: mtime
-    is wall-clock time, so the drain's injectable `now` is not used here. If the file cannot be
-    stat'ed its age is unknown, so it is treated as within grace (deferred with a warning, never
-    quarantined on a guess)."""
+def _pending_age(p: Path) -> float:
+    """Seconds since a pending file's mtime (negative if the mtime is in the future). A separate
+    function so the age check has one seam; raises OSError (FileNotFoundError if the file is gone)."""
+    return time.time() - p.stat().st_mtime
+
+
+def _grace_status(p: Path):
+    """Classify a pending file for the grace-window decision. Returns (status, detail):
+      ("young", age)      -- mtime within QUARANTINE_GRACE_SECONDS of the wall clock, EITHER side (to
+                             tolerate cross-machine clock skew on a synced file): may still be syncing
+      ("old", age)        -- outside the window: quarantine it
+      ("vanished", None)  -- gone before the age check (FileNotFoundError)
+      ("unknown", exc)    -- the age could not be determined (any other OSError): never quarantined on a guess
+    The wall clock is deliberate: mtime is wall-clock time, so the drain's injectable `now` is not used.
+    LIMIT: this keys on the file's modification time, and OneDrive preserves the SOURCE machine's mtime,
+    so a file that a peer wrote long ago and that only syncs here late looks "old" and is quarantined at
+    once (recovered by moving it back to pending/); a peer clock off by more than the window does the same."""
     try:
-        age = time.time() - p.stat().st_mtime
-    except OSError:
-        return True
-    return abs(age) < QUARANTINE_GRACE_SECONDS
+        age = _pending_age(p)
+    except FileNotFoundError:
+        return "vanished", None
+    except OSError as exc:
+        return "unknown", exc
+    return ("young" if abs(age) < QUARANTINE_GRACE_SECONDS else "old"), age
 
 
 def _quarantine_pending(p: Path, name: str, corrupt_dir: Path, why) -> bool:
@@ -1404,7 +1417,22 @@ def _quarantine_pending(p: Path, name: str, corrupt_dir: Path, why) -> bool:
 
 def _defer_or_quarantine_pending(p: Path, name: str, corrupt_dir: Path, why) -> None:
     """A decode/parse failure: defer while the file may still be syncing, quarantine once it is old."""
-    if _within_quarantine_grace(p):
+    status, detail = _grace_status(p)
+    if status == "vanished":
+        print(
+            f"WARNING: pending event file {name} vanished before its age could be checked ({why}); "
+            "nothing to defer or quarantine",
+            file=sys.stderr,
+        )
+        return
+    if status == "unknown":
+        print(
+            f"WARNING: pending event file {name} is not yet valid ({why}) and its age cannot be determined "
+            f"({detail}); it stays in pending/ for the next drain (not quarantined on a guess)",
+            file=sys.stderr,
+        )
+        return
+    if status == "young":
         print(
             f"WARNING: pending event file {name} is not yet valid ({why}); it may still be syncing, so it "
             f"stays in pending/ for the next drain (quarantined only if still bad after "
@@ -1612,12 +1640,29 @@ def read_events(project_id, *, root: str | None = None) -> list[dict]:
                 )
                 continue
             if status == "undecodable":
-                continue  # half-synced or corrupt; the drain owns the grace-window / quarantine decision
+                # Half-synced or corrupt; the drain owns the grace-window / quarantine decision. Say so
+                # instead of silently omitting a possibly-valid committed event (AMD-0004 B.3).
+                print(
+                    f"WARNING: read_events skipped pending event file {name} ({raw}); this view omits that "
+                    "event (the drain decides whether it is still syncing or to be quarantined)",
+                    file=sys.stderr,
+                )
+                continue
             try:
                 event = json.loads(raw)
-            except json.JSONDecodeError:
+            except json.JSONDecodeError as exc:
+                print(
+                    f"WARNING: read_events skipped pending event file {name} (not valid JSON: {exc}); this "
+                    "view omits that event (the drain decides whether it is still syncing or to be quarantined)",
+                    file=sys.stderr,
+                )
                 continue
             if not isinstance(event, dict):
+                print(
+                    f"WARNING: read_events skipped pending event file {name} (JSON, but not an object); this "
+                    "view omits that event (the drain will quarantine it)",
+                    file=sys.stderr,
+                )
                 continue
             event_id = event.get("event_id")
             if event_id is not None:

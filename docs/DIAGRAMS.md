@@ -77,7 +77,8 @@ flowchart TB
     FOLD --> WRITE["atomic_write whole NDJSON (O(N) per emit)\nthen move pending -> _drained/"]
     WRITE --> REL["_release_drain_lock\n(10 x 5ms retry, silent give-up)"]
     REL --> DONE
-    FOLD -->|"bad pending file"| CORRUPT["move to _corrupt/ + stderr warning"]
+    FOLD -->|"bad pending file, older than the grace window (600s)"| CORRUPT["move to _corrupt/ + stderr warning"]
+    FOLD -->|"bad pending file, younger than the grace window"| DEFER["stay in pending/ + stderr warning,\nretry next drain"]
 
     subgraph READERS
       RE["read_events(): NDJSON + pending, dedupe,\nsort by timestamp\n(project-notion, fail-task DoubleFailure)"]
