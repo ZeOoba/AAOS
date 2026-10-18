@@ -4,7 +4,7 @@
 
 Accepted
 
-**Amended 2026-10-17 by AMD-0003 (PROPOSED, pending ratification; merging without the ratification record at the end of the Amendment section ratifies nothing).** See the Amendment section at the end of this file.
+**Amended 2026-10-17 by AMD-0003 (ratified 2026-10-18; see the ratification record at the end of the Amendment section).** See the Amendment section at the end of this file.
 
 ## Context
 
@@ -45,7 +45,7 @@ This design extends the existing `chip-claims.log` pattern — timestamp, stalen
 
 ## Amendment — 2026-10-17 (AMD-0003: locality, Cowork write rule, settle bound, routing)
 
-**PROPOSED. RED, docs-only. Not in force until the ratification record at the end of this section is filled in; merging without it ratifies nothing.** It changes no code. Dependent code and doc changes land in separate PRs that cite the merge commit of the *ratified* text. This amendment states **requirements and prohibitions**; mechanisms are settled in the implementing PRs, with tests. Sources: audit findings M01, M02, M38, the L0 evidence, and two independent adversarial reviews of earlier drafts. Companions: AMD-0004 (ADR-0004), AMD-0006 (ADR-0006). Where the hardened plan (PR #13) disagrees with this text, this text governs; see the plan's "Superseded by the amendments" section.
+**RATIFIED 2026-10-18 (see the ratification record at the end of this section). Docs-only.** It changes no code. Dependent code and doc changes land in separate PRs that cite the merge commit of the *ratified* text. This amendment states **requirements and prohibitions**; mechanisms are settled in the implementing PRs, with tests. Sources: audit findings M01, M02, M38, the L0 evidence, and two independent adversarial reviews of earlier drafts. Companions: AMD-0004 (ADR-0004), AMD-0006 (ADR-0006). Where the hardened plan (PR #13) disagrees with this text, this text governs; see the plan's "Superseded by the amendments" section.
 
 ### A. Locality: how Cowork reaches the seam
 
@@ -101,4 +101,4 @@ Before **any lock I/O** at the start of acquisition, the acquirer MUST verify th
 ### Ratification record
 **Cross-PR ratification order: ratify PR #20 (AMD-0006), then PR #19 (AMD-0004), then PR #18 (AMD-0003).** The three amendments cross-reference each other (AMD-0003 depends on AMD-0006 for the lock-ownership requirements and cites AMD-0004 section C for the `.part` rename that R1 permits; the `refs.reason` enum it needs belongs to plan item S0, not to AMD-0004; AMD-0004 depends on AMD-0006 for the drain-lock primitive), so any other order leaves a ratified text citing an unratified one.
 
-Pending. Completed by a docs commit on Gabriel's instruction (PR #18 is already merged, and merging it ratified nothing): that commit replaces this paragraph, not the ordering note above it, with `Ratified by Gabriel, <date>, scope: <sections>, PR #18`, and replaces the PROPOSED banner at the top of this file's Status section. Code PRs cite that commit.
+Ratified by Gabriel, 2026-10-18, scope: A, B, C, PR #18. Recorded by Claude on Gabriel's explicit in-chat instruction of 2026-10-18; this commit is the ratification act. Code PRs cite this commit.

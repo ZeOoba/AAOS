@@ -4,7 +4,7 @@
 
 Accepted
 
-**Amended 2026-10-17 by AMD-0004 (PROPOSED, pending ratification; merging without the ratification record at the end of the Amendment section ratifies nothing).** See the Amendment section at the end of this file.
+**Amended 2026-10-17 by AMD-0004 (ratified 2026-10-18; see the ratification record at the end of the Amendment section).** See the Amendment section at the end of this file.
 
 ## Context
 
@@ -30,7 +30,7 @@ The mechanism was redesigned: **spooling is now the unconditional first step and
 
 ## Amendment — 2026-10-17 (AMD-0004: drain-lock ownership, fold safety, ordering, milestone mirror)
 
-**PROPOSED. RED, docs-only. Not in force until the ratification record at the end of this section is filled in; merging without it ratifies nothing.** It changes no code. Each conforming change lands in a separate PR that cites the merge commit of the *ratified* text, except the two PRs named below, which land *before* ratification and are ratified retroactively with it (as PR #17 was for AMD-0003 section B). This amendment states **requirements only**; mechanisms are designed in the implementing PRs and proven by tests. **Scope was deliberately cut:** inbound-event validation and commit-failure roll-forward are **not** amended here (section D). Where the hardened plan (PR #13) disagrees with this text, this text will govern once ratified; see the plan's "Superseded by the amendments" section (PR #22). Companions: AMD-0003 and AMD-0006, both merged and awaiting their ratification records.
+**RATIFIED 2026-10-18 (see the ratification record at the end of this section). Docs-only.** It changes no code. Each conforming change lands in a separate PR that cites the merge commit of the *ratified* text, except the two PRs named below, which land *before* ratification and are ratified retroactively with it (as PR #17 was for AMD-0003 section B). This amendment states **requirements only**; mechanisms are designed in the implementing PRs and proven by tests. **Scope was deliberately cut:** inbound-event validation and commit-failure roll-forward are **not** amended here (section D). Where the hardened plan (PR #13) disagrees with this text, this text will govern once ratified; see the plan's "Superseded by the amendments" section (PR #22). Companions: AMD-0003 and AMD-0006, ratified together with this amendment on 2026-10-18.
 
 ### A. Drain-lock ownership
 
@@ -81,4 +81,4 @@ The Decision above requires each `event_log.md` milestone to have a paired NDJSO
 4. Timestamps with a trailing `Z` parse and order identically on Python 3.10, 3.11 and 3.13 (C, PR #23).
 
 ### Ratification record
-Pending. Filled in by a docs commit on Gabriel's instruction, replacing this block with `Ratified by Gabriel, <date>, scope: <sections>, PR #19` and the PROPOSED banner at the top of this file's Status section. Merging this PR without it ratifies nothing (as happened with AMD-0003 and AMD-0006, whose records are completed separately).
+Ratified by Gabriel, 2026-10-18, scope: A, B, C, PR #19. Recorded by Claude on Gabriel's explicit in-chat instruction of 2026-10-18; this commit is the ratification act. Code PRs cite this commit.
