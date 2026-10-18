@@ -20,7 +20,7 @@ requirements.txt, .github/workflows/ci.yml"]
         PUBN["publish-notion.py\n(urllib POST)"]
         PUBC["publish-contracts.py"]
         DRIFT["check-contract-drift.py\n(read-only audit)"]
-        TESTS["tests/ (unittest; per-test tmpdir seams,\nnever the live seam)\nCI: ubuntu-latest, Python 3.11 + 3.13"]
+        TESTS["tests/ (unittest; per-test tmpdir seams,\nnever the live seam)\nCI: ubuntu-latest + windows-latest, Python 3.10 + 3.11 + 3.13"]
     end
 
     subgraph SEAM["Seam: OneDrive-synced, no git: Claude_Workspace/AAOS/"]
@@ -137,7 +137,7 @@ AAOS/
 │   │                            (stdlib urllib, NOTION_TOKEN env var, --dry-run supported)
 │   └── check-contract-drift.py  read-only guard: has the seam mirror drifted from the git tree?
 ├── requirements.txt        dependency floor: jsonschema>=4.18
-├── .github/workflows/ci.yml  GitHub Actions: runs the suite on push/PR to main (Python 3.11, 3.13)
+├── .github/workflows/ci.yml  GitHub Actions: runs the suite on push/PR to main (Python 3.10, 3.11, 3.13)
 ├── tests/                  unittest suite (current count and last-green date: see section 4, Setup & run)
 │   ├── _tool_loader.py         shared helper for importing hyphenated tools/*.py files in tests
 │   ├── test_aaos_common.py, test_queue_scripts.py, test_e2e_lifecycle.py,
@@ -177,7 +177,7 @@ Dependencies are declared in `requirements.txt` (`jsonschema>=4.18`; `Draft20201
 There is no build step, package, or installed CLI entry point — every script is invoked directly with `python`.
 
 **Prerequisites:**
-- Python 3 (CI runs 3.11 and 3.13) with `jsonschema` installed (`pip install -r requirements.txt`; floor-pinned, no lockfile).
+- Python 3 (CI runs 3.10, 3.11 and 3.13; 3.10 is the interpreter inside Cowork's sandbox) with `jsonschema` installed (`pip install -r requirements.txt`; floor-pinned, no lockfile).
 - The seam directory reachable at `C:/Users/Owner/OneDrive - Oxford Capital Partners/Claude_Workspace/AAOS/` (hardcoded default in `tools/_aaos_common.py`'s `DEFAULT_SEAM_ROOT`; overridable per-invocation with `--seam-root`).
 
 **Run the test suite:**

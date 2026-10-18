@@ -45,7 +45,9 @@ class ParseZ(unittest.TestCase):
     def test_naive_and_malformed_values_are_still_rejected(self):
         for bad in ("2026-07-10T17:46:23", "2026-07-10", "Z", "", "2026-07-10T17:46:23+00:00Z",
                     "2026-07-10T17:46:23ZZ", "not-a-date", "2026-07-10Z",
-                    "2026-07-10T17:46:23z"):  # lowercase z: rejected by 3.11+, so rejected everywhere
+                    "2026-07-10T17:46:23z",  # lowercase z: rejected by 3.11+, so rejected everywhere
+                    # 'replace every Z' would accept these three (they are rejected on 3.10, 3.11 and 3.13 today)
+                    "0001-01-01ZZ", "1970-01-01Z+00:00", "2026-07-10Z+00:00"):
             with self.subTest(bad=bad):
                 with self.assertRaises(aaos.CorruptStateError):
                     aaos._parse_iso_dt(bad)
