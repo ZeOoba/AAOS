@@ -442,14 +442,15 @@ def _now(now: datetime | None = None) -> datetime:
 
 
 _PY310_ISO = re.compile(
-    r"(?P<head>\d{4}-\d{2}-\d{2}[T ]\d{2}:\d{2}:\d{2})"
+    r"(?P<head>\d{4}-\d{2}-\d{2}.\d{2}:\d{2}:\d{2})"
     r"(?:[.,](?P<frac>\d*))?"
-    r"(?:(?P<z>Z)|(?P<sign>[+-])(?P<hh>\d{2})(?::(?P<mm>\d{2})(?::(?P<ss>\d{2}))?|(?P<cmm>\d{2})(?P<css>\d{2})?)?)?"
+    r"(?:(?P<z>Z)|(?P<sign>[+-])(?P<hh>\d{2})(?::(?P<mm>\d{2})(?::(?P<ss>\d{2}))?|(?P<cmm>\d{2})(?P<css>\d{2})?)?)?",
+    re.DOTALL,  # 3.11+ accepts any one character, a newline included, between date and time
 )
 
 
 def _normalise_iso_for_py310(text: str) -> str:
-    """Rewrite a full `YYYY-MM-DD[T ]HH:MM:SS[.f][offset]` stamp into the shape Python 3.10's
+    """Rewrite a full `YYYY-MM-DD<sep>HH:MM:SS[.f][offset]` stamp (any one-character separator, as 3.11+ allows) into the shape Python 3.10's
     datetime.fromisoformat accepts: a trailing Z as +00:00, the fraction padded or truncated to 6 digits
     with a '.', and the offset as +HH:MM[:SS]. 3.11+ accepts all of these as written (a fraction of any
     length, truncated to 6 digits; the comma decimal; +HH, +HHMM, +HHMMSS offsets), so `_parse_iso_dt`
