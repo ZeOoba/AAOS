@@ -58,15 +58,13 @@ The Context above calls Cowork a "possibly cloud-hosted surface". Evidence gathe
 
 **Precondition (new, explicit).** The atomicity of `O_CREAT|O_EXCL` create, `os.link` publish and `os.replace` is relied on only among processes running **directly on the seam's local NTFS volume** (Code, including the scheduled Code fleet). For a Cowork VM session writing through its folder mount, those guarantees are **UNVERIFIED**. `[PENDING: Cowork probe L0 (mount type, stat/link semantics, clocks) and the V1 soak (writes, distinct project id)]`. The compensating control is unchanged and becomes load-bearing: settle-then-rescan with conflict-copy detection (Acquire protocol steps 4-5) and fail-closed on ambiguity.
 
-**Proposed rule R1 (RATIFICATION QUESTION).** Until the pending items resolve in favour of the mount, a Cowork VM session MUST NOT run any tool that creates, reclaims or releases a lock or that drains the event spool: `lease-task`, `complete-task`, `fail-task`, `expire-leases`, and any `emit-event` call that drains. It works SAFE-BY-HAND only (handoffs, spool files, new tasks per COWORK-BOOTSTRAP section 7). This narrows COWORK-BOOTSTRAP section 6, which today grants `MODE = FULL-EXEC` "full parity with Code"; a conforming PR would cap Cowork at SAFE-BY-HAND for every lock-mutating operation.
+**Rule R1 (decided: option (c), Gabriel, 2026-10-17).** Until the lift condition below is met, a Cowork VM session MUST NOT run any tool that creates, reclaims or releases a lock or that drains the event spool: `lease-task`, `complete-task`, `fail-task`, `expire-leases`, and any `emit-event` call that drains. It works SAFE-BY-HAND only (handoffs, spool files, new tasks per COWORK-BOOTSTRAP section 7). This narrows COWORK-BOOTSTRAP section 6, which today grants `MODE = FULL-EXEC` "full parity with Code"; a conforming PR caps Cowork at SAFE-BY-HAND for every lock-mutating operation. The decision takes effect with this amendment's merge (the bootstrap edit follows it).
 
-Options for Gabriel:
+**Lift condition.** R1 is lifted only by a further, explicit documentation change (not automatically) once **both** hold:
+1. the L0 Cowork probe has reported the mount type and file-identity/link semantics `[PENDING]`, and nothing in it contradicts atomic exclusive-create, `os.link` and rename-over-existing across the mount; and
+2. the V1 OneDrive contention soak (distinct project id, never `ora-ops`) has passed its criteria with Cowork as a contender, or, if the Cowork contender cannot be reproduced within the soak's two-session timebox, R1 stays in force and Cowork remains SAFE-BY-HAND.
 
-| Option | Effect |
-|---|---|
-| **(c) R1 now, lift it when the probe and soak pass (recommended)** | Closes the unverified-atomicity exposure today; costs nothing while Cowork already runs SAFE-BY-HAND in practice (its only recorded session did). |
-| (b) R1 permanently | Simplest trust model; forgoes Cowork leasing even if the mount proves atomic. |
-| (a) Keep FULL-EXEC | No change; relies on conflict-copy detection alone for cross-surface correctness. |
+Alternatives considered and not chosen: (b) R1 permanently (forgoes Cowork leasing even if the mount proves atomic); (a) keep FULL-EXEC (relies on conflict-copy detection alone for cross-surface correctness).
 
 ### B. Thresholds are unchanged; the settle must be shorter than the lease (clarification)
 
@@ -91,4 +89,4 @@ Options for Gabriel:
 
 1. Routing: a holder not in the registry is denied; a registered holder on a task owned by another agent is denied; an `unassigned` task is leasable by any registered holder; an unreadable registry denies.
 2. Settle bound: `--settle-sec` equal to or above `--ttl-min x 60` exits 2 (covered by PR #17's tests).
-3. R1, once ratified: a documented check that the Cowork bootstrap never instructs a lock-mutating tool in SAFE-BY-HAND mode.
+3. R1: a documented check that the Cowork bootstrap never instructs a lock-mutating tool, and that FULL-EXEC is capped as above, until the lift condition is recorded as met.
