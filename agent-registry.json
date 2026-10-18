@@ -26,7 +26,7 @@
     },
     {
       "id": "cowork",
-      "surface": "Claude Cowork (cloud-hosted agent surface; interactive sessions and the LAMS/Cowork scheduled fleet)",
+      "surface": "Claude Cowork (local per-session Linux container; the seam is a FUSE bridge to the host folder, mounted at $HOME/mnt/AAOS; interactive sessions and the LAMS/Cowork scheduled fleet)",
       "capabilities": ["notion", "underwriting", "email-draft", "tenant-intelligence"],
       "reachable_paths": [
         "C:/Users/Owner/OneDrive - Oxford Capital Partners/Claude_Workspace/**",
