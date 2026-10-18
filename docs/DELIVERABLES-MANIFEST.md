@@ -16,7 +16,7 @@ Checks off the master prompt's §5 "Deliverables Manifest" verbatim against what
 
 - [x] `schemas/{agent-registry,task,handoff,event,heartbeat}.schema.json` — all 5, JSON Schema draft 2020-12, re-validated against the meta-schema this session (`Draft202012Validator.check_schema`, all 5 `OK`).
 - [x] `tools/validate.py` — the validator CLI (schema inference, `protocol_version` gating, write-scope colonization guard).
-- [x] Full test suite — **173 tests, all green at v1.0 (historical; 267 as of origin/main 12ae2e4, recounted 2026-10-06)** (`python -m unittest discover -s tests -p "test_*.py"`, independently re-run this session after every fix).
+- [x] Full test suite — **173 tests, all green at v1.0 (historical; the current count is recorded once, in README.md section 4)** (`python -m unittest discover -s tests -p "test_*.py"`, independently re-run this session after every fix).
 
 ## `Queue/lock/lease/event tooling with tests`
 
@@ -44,7 +44,7 @@ Checks off the master prompt's §5 "Deliverables Manifest" verbatim against what
 
 ## `Staged (not auto-registered) scheduled-task definition for lease sweep`
 
-- [x] `tools/expire-leases.py` — built, tested (reclaim/dry-run/corrupt-lock/concurrent-sweep-race coverage), and run for real against the live seam multiple times this session. **Never registered** via `create_scheduled_task` on either fleet — staged-with-the-command-known, per Gate 3's own exit criterion ("explicitly deferred with the command staged"), consistent with the master prompt's supervised-registration-with-in-turn-confirmation requirement, which was never sought.
+- [x] `tools/expire-leases.py` — built, tested (reclaim/dry-run/corrupt-lock/concurrent-sweep-race coverage), and run for real against the live seam multiple times this session. **[Historical v1.0 state, superseded: registered 2026-07-10 as `ora-aaos-expire-leases` on the CC/MCP fleet; see "Closed since v1.0" below.]** At v1.0 it was *never registered* via `create_scheduled_task` on either fleet — staged-with-the-command-known, per Gate 3's own exit criterion ("explicitly deferred with the command staged"), consistent with the master prompt's supervised-registration-with-in-turn-confirmation requirement, which was never sought.
 
 ## `aaos/state/BUILD-STATE.md maintained throughout`
 
@@ -59,6 +59,6 @@ Checks off the master prompt's §5 "Deliverables Manifest" verbatim against what
 
 **Closed since v1.0:**
 - `tools/publish-notion.py` (built in its own worktree, request approved in-turn) is the "future agent-session call site" this section's original item 3 deferred for `project-notion.py`'s output — it POSTs the projection payload as a dated child page under the Notion Ops Hub (`32b6ecd8…`), per `docs/CAPABILITY-MAP.md` item 3's REUSE guidance (existing child-page convention, no parallel database). Stdlib-only HTTP (no new dependency), pure-builder/thin-IO-wrapper split matching this repo's house style, 22 unit tests (dry-run, mocked success, mocked HTTPError/URLError). Still never touches tasks/locks/events — read-only against the local projection, write-only against Notion, matching ADR-0001 (Notion stays Derived, never primary).
-- **Scheduled-task registration of `expire-leases.py`** — this section's original item 2 was already stale when read on 2026-07-26: `list_scheduled_tasks` shows `ora-aaos-expire-leases` live on the CC/MCP fleet since 2026-07-10 (cadence halved 6×→3×/day on 2026-07-16 per Fleet Ledger v2 ruling C2; last successful run 2026-07-26T17:12 ET, cron `12 7,13,19 * * *`). This doc's claim that registration was "never attempted... never requested" was never corrected after the fact — a live-registry check should be the standing practice before citing this file's open-items list as current, not just reading it.
+- **Scheduled-task registration of `expire-leases.py`** — this section's original item 2 was already stale when read on 2026-07-26: `list_scheduled_tasks` shows `ora-aaos-expire-leases` live on the CC/MCP fleet since 2026-07-10 (cadence halved 6×→3×/day on 2026-07-16 per Fleet Ledger v2 ruling C2; last successful run 2026-07-26T17:12 ET; cron at that date `12 7,13,19 * * *` -- historical, the current cadence lives in the live registry (`list_scheduled_tasks`), not in this file). This doc's claim that registration was "never attempted... never requested" was never corrected after the fact — a live-registry check should be the standing practice before citing this file's open-items list as current, not just reading it.
 
-**v1.0 is complete.** All six gates self-assessed PASS with evidence; all master-prompt deliverables present; 173/173 tests green at v1.0 (267 on origin/main as of 2026-10-06); every adversarial/independent-review finding across all five phases (4 Critical, several Important, many Minor) resolved and independently re-verified, not merely accepted.
+**v1.0 is complete.** All six gates self-assessed PASS with evidence; all master-prompt deliverables present; 173/173 tests green at v1.0 (current count: README.md section 4); every adversarial/independent-review finding across all five phases (4 Critical, several Important, many Minor) resolved and independently re-verified, not merely accepted.

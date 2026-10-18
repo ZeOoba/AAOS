@@ -2,6 +2,21 @@
 
 This is a human-facing quick-reference for operating the ORA Agent Coordination Layer (AAOS) day to day. Audience: Gabriel (or any human operator) sitting down to check on or intervene in the queue — not an agent. It assumes the mechanics already decided in the ADRs below and does not re-argue them; it only tells you where to look and what to click/edit/run, right now, for five recurring situations: four step-by-step procedures below (§1-4), plus a failure-mode index (§5) that maps every scenario this project's failure-injection tests exercise to one of those four procedures or to its own short recovery note. If a step here seems to contradict an ADR, the ADR wins — file a correction rather than trusting this doc over the source.
 
+## Symptom to command
+
+| You see | Check | Go to |
+|---|---|---|
+| A lease is past its `expires` and nothing has moved | `python C:\Users\Owner\AAOS\tools\expire-leases.py --dry-run` | section 2, then 5.1 |
+| A task file was hand-edited or fails to parse | `python C:\Users\Owner\AAOS\tools\validate.py "C:\Users\Owner\OneDrive - Oxford Capital Partners\Claude_Workspace\AAOS\projects\ora-ops\tasks\<task-id>.json"` (`JSON PARSE ERROR` = corrupt) | 5.2 |
+| `lease-task.py` exits `DENIED` (3) or `CONTESTED` (4) | Nothing: normal under contention; re-read the task state before retrying | 5.3 |
+| Tools fail with a seam/usage error, or the seam folder is missing | Is `Claude_Workspace\AAOS` reachable? Is OneDrive sync paused? Is `--seam-root` right? | 5.4 |
+| The Notion mirror looks old | Read `generation.stale` in `C:\Users\Owner\AAOS\tools\project-notion.py` output; do not eyeball timestamps | 5.5 |
+| `protocol_version mismatch` from `validate.py` | Regenerate the file with current tooling; for a whole-schema bump see section 4 | 5.6, section 4 |
+| Files accumulate in `events\aaos-events.ndjson.pending\` | `python C:\Users\Owner\AAOS\tools\emit-event.py --drain-only --project ora-ops`; if they keep accumulating, suspect the seam first | 5.7, 5.4 |
+| A stray `<name>.tmp-<pid>` file sits next to a state file | `python C:\Users\Owner\AAOS\tools\validate.py <full path of the real file>`; `VALID` means the temp file is an abandoned write | 5.8 |
+| `post-handoff.py` exits 1 with a write-scope message | Compare the artifact path with the sender's `write_scope` in `agent-registry.json` | 5.9 |
+| You need to retire an in-flight (leased) task | Same procedure as a finished task | section 3, 5.10 |
+
 All live coordination state lives on the OneDrive seam, under:
 
 ```
@@ -52,7 +67,7 @@ This checks the file against its schema (`C:\Users\Owner\AAOS\schemas\*.schema.j
 
 ## 2. Break a stuck lock
 
-Use this when a lock looks stuck — past its `expires` time, holder unresponsive — but the automated `expire-leases` sweep (built, and scheduled on the CC/MCP fleet as `ora-aaos-expire-leases` since 2026-07-10, weekly, Mondays 07:20 ET (cron `20 7 * * 1`; was 3×/day until 2026-08-05 and 1×/day until 2026-09-13) — `list_scheduled_tasks` is the source of truth, not this doc) hasn't run yet, or you don't trust it to run in time. This manual procedure is what that sweep automates on its own cadence; use it to intervene ahead of that cadence, or if the scheduled sweep itself looks stuck.
+Use this when a lock looks stuck — past its `expires` time, holder unresponsive — but the automated `expire-leases` sweep (built, and scheduled on the CC/MCP fleet as `ora-aaos-expire-leases` since 2026-07-10, cadence and cron: `list_scheduled_tasks` is the source of truth, not this doc; cadence history in docs/README.md) hasn't run yet, or you don't trust it to run in time. This manual procedure is what that sweep automates on its own cadence; use it to intervene ahead of that cadence, or if the scheduled sweep itself looks stuck.
 
 1. **Locate the lock.** `locks\<task-id>.lock` (JSON: `protocol_version`, `task_ref`, `holder`, `acquired`, `expires`, `session`).
 2. **Confirm it's genuinely expired**, not just old-looking:
