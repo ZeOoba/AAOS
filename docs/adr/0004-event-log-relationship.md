@@ -34,7 +34,7 @@ The mechanism was redesigned: **spooling is now the unconditional first step and
 
 ### A. Drain-lock ownership
 
-The 2026-07-10 Revision above specifies an `O_EXCL` drain lock "with a staleness-based reclaim". The implemented takeover archives whatever sits at the lock *path*, so two drainers that judge the same lock stale can both take it, and the release is an unconditional unlink by path, so a stalled holder deletes its successor's lock. **Requirements:** the drain lock's takeover and release MUST satisfy the ownership-transfer requirements of AMD-0006 (no unconditional action by path; content verified; every remaining window documented and detected). Before replacing the NDJSON, a drainer MUST confirm it still owns the drain lock, and aborts (leaving its spool files pending) if it does not. *Not implemented today.*
+The 2026-07-10 Revision above specifies an `O_EXCL` drain lock "with a staleness-based reclaim". The implemented takeover archives whatever sits at the lock *path*, so two drainers that judge the same lock stale can both take it, and the release is an unconditional unlink by path, so a stalled holder deletes its successor's lock. **Requirements:** the drain lock's takeover and release MUST satisfy the ownership-transfer requirements of AMD-0006 (no unconditional action by path; content verified; every remaining window documented and detected). Before replacing the NDJSON, a drainer MUST confirm it still owns the drain lock, and aborts (leaving its spool files pending) if it does not. *Not implemented today.* **Drain-lock identity:** the lock holds only `{holder_pid, acquired}`, and a pid is neither unique over time nor across hosts on a synced folder, so a per-acquisition nonce MUST be added to the lock content for the ownership check to be meaningful.
 
 ### B. Fold safety and visibility
 
@@ -76,7 +76,7 @@ The Decision above requires each `event_log.md` milestone to have a paired NDJSO
 ## Verification (additions)
 
 1. A forced interleaving (a rival steals the drain lock between judge and act) leaves exactly one holder (A). `tests/test_drain_lock_interleaving.py` pins this (the two M01 `@known_defect` markers: steal and release); it asserts holder count and lock content, and the A1b PR adds the event-presence assertion and removes those two markers.
-2. `read_events` called while a drain folds between its two reads still returns the event (B.3); an unreadable pending file is reported as flagged, not skipped.
+2. `read_events` called while a drain folds between its two reads still returns the event (B.3); an unreadable pending file is reported as flagged, not skipped; an event left in both the NDJSON and `pending/` (a simulated crash between the NDJSON replace and the move to `_drained/`) is returned once and is not duplicated into the NDJSON by the next drain (B.1).
 3. A transient `OSError` leaves a file pending and it folds on the next drain (B.4, PR #21); two files with the same `event_id` and different content are reported by the reconciliation (B.2).
 4. Timestamps with a trailing `Z` parse and order identically on Python 3.10, 3.11 and 3.13 (C, PR #23).
 
