@@ -479,7 +479,7 @@ Run by Gabriel in one interactive desktop Cowork session with `Claude_Workspace\
 **Decision (recommended):** make the parser interpreter-independent and guard it. (1) Test-first, `_parse_iso_dt` normalizes a trailing `Z` to `+00:00` before `fromisoformat`, so 3.10, 3.11 and 3.13 agree; (2) add 3.10 to the CI matrix, which costs nothing now that the suite passes on it, so Cowork's actual interpreter is guarded; (3) correct the `ci.yml` comment. Alternative: keep 3.11 as the floor and document that Cowork only runs the SAFE-BY-HAND recipes and `validate.py` (leaves the silent mis-ordering reachable).
 
 
-## 15. Superseded by the amendments (reconciliation, 2026-10-18)
+## 15. Superseded by the amendments (reconciliation after the second review)
 
 Two independent adversarial reviews of AMD-0003, AMD-0004 and AMD-0006 (PRs #18-#20) refuted parts of this plan's design text. **The amendments govern; this plan does not.** Implementers: do not follow the rows below as written. Once the amendments are ratified, each row's replacement is the text in the amendment named in the right-hand column.
 
@@ -494,7 +494,7 @@ Two independent adversarial reviews of AMD-0003, AMD-0004 and AMD-0006 (PRs #18-
 | Section 8, Q8 rationale ("adds a new seam writer") | **Corrected:** `emit-event.py --event-log-ref` already exists; what is deferred is an automated caller | AMD-0004 F |
 | Section 11.1-11.3, items with A0/A0.5 | Unchanged | n/a |
 | Section 13 item 1: "Cowork writes through a VM folder mount" listed as **Established**; section 13 "only 6 sessions" | **Corrected:** the probe (section 14) shows a FUSE bridge to the host NTFS folder; only 3 sessions selected the `Claude_Workspace` root, the latest on 2026-07-10 | AMD-0003 A |
-| Section 13 / ballot Q11-Q12 wording on `cowork`-owned tasks ("handoff-only, never leased") | **Reversed (Gabriel, 2026-10-18):** while R1 holds, `claude-code` may lease a `cowork`-owned task, acting on Cowork's return handoff | AMD-0003 C |
+| Section 13 / ballot Q11-Q12 wording on `cowork`-owned tasks ("handoff-only, never leased") | **Reversed (Gabriel, after the second review):** while R1 holds, `claude-code` may lease a `cowork`-owned task, acting on Cowork's return handoff | AMD-0003 C |
 | B1, B5, F0 rows: `refs.event_id` / `count` as event fields | **Withdrawn:** `refs` is closed; ids and counts travel in `detail`; the only schema change is the ratified `refs.reason` enum | AMD-0004 E, D |
 | COWORK-BOOTSTRAP Recipe 2 (implicit in B3a) | **New requirement:** Cowork writes the spool file as `<name>.part` and renames it | AMD-0004 Consequences |
 
