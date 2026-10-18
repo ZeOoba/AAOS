@@ -27,3 +27,7 @@ The queue CLIs now reject invalid inputs with exit 2 *before* any lock, lease, e
 - `--now` must also fall in years 1970-9000. An extreme year made later `now +/- timedelta(...)` arithmetic raise `OverflowError` (exit 1 'UNEXPECTED ERROR') instead of a usage error.
 - `publish-notion.py` writes the validated `--now` back with `datetime.isoformat()`, so non-canonical inputs are normalized in the page title (`...Z` becomes `...+00:00`, a space separator becomes `T`).
 - Callers to check: any recipe or scheduled-task command line that passes a naive `--now` or a zero/negative value. The scheduled `ora-aaos-expire-leases` sweep runs `expire-leases.py --project ora-ops` with defaults only, so it is unaffected; verify with one supervised run after merge.
+
+### 2026-10-17 -- timestamps: a trailing 'Z' parses the same on every Python (L0 probe finding)
+- Cowork's sandbox runs Python 3.10, and `datetime.fromisoformat` only accepts a trailing `Z` from 3.11. On 3.10 that made `_parse_iso_dt` raise, `parse_cli_now` reject a valid `--now`, and `read_events` silently sort Cowork's `Z`-stamped events last (reversing their order against local-offset events). `_parse_iso_dt` now rewrites a `Z` that directly follows a digit to `+00:00` before parsing, so 3.10, 3.11 and 3.13 agree. Nothing that 3.11+ rejected is newly accepted (a lowercase `z`, a doubled `ZZ`, a bare `Z`, a naive value).
+- CI now also runs Python 3.10, Cowork's interpreter (measured 3.10.12).

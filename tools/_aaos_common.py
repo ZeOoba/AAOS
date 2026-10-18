@@ -447,8 +447,13 @@ def _parse_iso_dt(value) -> datetime:
     UTC (design section 0.3)."""
     if not isinstance(value, str) or not value:
         raise CorruptStateError(f"missing or non-string datetime value: {value!r}")
+    # Python 3.10 (the interpreter inside Cowork's sandbox) rejects a trailing 'Z'; 3.11+ accepts it.
+    # Cowork stamps UTC as '...Z', so normalize it to '+00:00' to make every Python agree. Only an
+    # uppercase 'Z' that directly follows a digit is rewritten, so what 3.11+ rejects (a lowercase 'z', a
+    # doubled 'ZZ', a bare 'Z') stays rejected on 3.10 as well.
+    text = value[:-1] + "+00:00" if value.endswith("Z") and value[-2:-1].isdigit() else value
     try:
-        dt = datetime.fromisoformat(value)
+        dt = datetime.fromisoformat(text)
     except ValueError as exc:
         raise CorruptStateError(f"unparseable datetime value {value!r}: {exc}") from exc
     if dt.tzinfo is None:
