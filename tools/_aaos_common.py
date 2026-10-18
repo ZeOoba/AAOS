@@ -1413,8 +1413,9 @@ def drain_event_spool(project_id, *, root: str | None = None, now: datetime | No
             if status == "transient":
                 # A read error is NOT evidence the event is bad (a OneDrive or antivirus sharing
                 # violation is the everyday cause). Quarantining it here used to move a valid event
-                # to _corrupt/, which no reader looks at. Leave it in pending/: it stays visible to
-                # read_events and the next drain retries it.
+                # to _corrupt/, which no reader looks at. Leave it in pending/ so the next drain retries it.
+                # (read_events cannot read it either while the error lasts, so readers do not see the
+                # event until it becomes readable; it is deferred, not lost.)
                 print(
                     f"WARNING: pending event file {name} could not be read ({raw}); leaving it in "
                     "pending/ for the next drain (not folded, not lost)",
