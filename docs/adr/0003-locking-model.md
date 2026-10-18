@@ -43,50 +43,63 @@ The existing `chip-claims.log` pattern — a timestamped claim with a staleness 
 
 This design extends the existing `chip-claims.log` pattern — timestamp, staleness window, explicit terminal states — with a settle-then-rescan step specifically for the cross-surface OneDrive boundary that the chip system never had to cross. It is explicitly framed as an extension of a proven pattern, not a new locking philosophy invented from scratch. The 30-second settle delay is the honest, acknowledged price of choosing the shared-folder architecture in ADR-0001.
 
-
 ## Amendment — 2026-10-17 (AMD-0003: locality, settle bound, routing)
 
-**Status of this amendment: PROPOSED. RED, docs-only. Not in force until Gabriel ratifies it and this PR merges.** It changes no code. The dependent code and doc changes land in separate PRs that cite this amendment's merge commit. Sources: audit findings M01, M02, M38 and the L0 locality findings in the hardened improvement plan (PR #13, section 13). Companion amendments: AMD-0004 (ADR-0004) and AMD-0006 (ADR-0006).
+**Status of this amendment: PROPOSED. RED, docs-only. Not ratified until the ratification record at the end of this section is filled in.** It changes no code. The dependent code and doc changes land in separate PRs that cite the merge commit of the *ratified* text. Sources: audit findings M01, M02, M38 and the L0 locality findings in the hardened improvement plan (PR #13, section 13). Companion amendments: AMD-0004 (ADR-0004) and AMD-0006 (ADR-0006). Revised after an independent adversarial review (12 of 17 claims in the first draft were refuted; the corrections are folded in below).
 
-### A. Locality: a Cowork session writes through a VM mount, not the seam's NTFS volume
+### A. Locality: Cowork sessions run in a per-session VM; the path by which they reach the seam is unverified
 
-The Context above calls Cowork a "possibly cloud-hosted surface". Evidence gathered read-only on 2026-10-17 shows otherwise:
+The Context above calls Cowork a "possibly cloud-hosted surface". Read-only evidence gathered 2026-10-17 from this machine's Cowork session metadata (structure only) shows otherwise:
 
-1. All 529 Cowork sessions recorded on this machine (202 interactive, 327 scheduled) run locally and carry a per-session VM process; none is cloud-hosted. (The newer cloud-scheduled mode cannot reach local paths and is out of scope.)
-2. The only live Code-to-Cowork round-trip (2026-07-10) reports running "path-translated to this session's mount" inside a "Cowork sandbox".
-3. Code stamps timestamps with a local UTC offset; Cowork stamps UTC (`Z`).
+1. All 529 recorded Cowork sessions (202 interactive, 327 scheduled) run locally with a per-session VM process; none is cloud-hosted. (The newer cloud-scheduled mode cannot reach local paths and is out of scope.)
+2. All 529 also record `hostLoopMode: true`, which suggests the agent loop, and possibly its file operations, run on the host rather than inside the VM. **Whether Cowork file operations reach the seam through a VM mount or directly on the host is not established.**
+3. Only 6 sessions ever listed `Claude_Workspace` as a selected folder; the most recent was created 2026-07-20. The last session that selected both `Claude_Workspace` and the AAOS repo, and the only recorded Code-to-Cowork round-trip, was 2026-07-10. Cross-surface locking has not been exercised since.
+4. The 2026-07-10 handoff on the seam (quoted from the live seam, not re-verifiable from this repo) says its probe ran "path-translated to this session's mount" in a "Cowork sandbox". Cowork-stamped events seen on the seam use a `Z` suffix; the bootstrap's own example uses `-04:00`, so the UTC offset is not guaranteed either way.
 
-**Precondition (new, explicit).** The atomicity of `O_CREAT|O_EXCL` create, `os.link` publish and `os.replace` is relied on only among processes running **directly on the seam's local NTFS volume** (Code, including the scheduled Code fleet). For a Cowork VM session writing through its folder mount, those guarantees are **UNVERIFIED**. `[PENDING: Cowork probe L0 (mount type, stat/link semantics, clocks) and the V1 soak (writes, distinct project id)]`. The compensating control is unchanged and becomes load-bearing: settle-then-rescan with conflict-copy detection (Acquire protocol steps 4-5) and fail-closed on ambiguity.
+**Precondition (new, explicit).** The atomicity of `O_CREAT|O_EXCL` create, `os.link` publish and `os.replace` is relied on only among processes running **directly on the seam's local NTFS volume** (Code, including the scheduled Code fleet). For a Cowork session those guarantees are **UNVERIFIED**. `[PENDING: Cowork probe L0 (mount type, link and stat semantics, clocks, and whether file operations run in the VM or on the host) and the V1 soak (writes, distinct project id)]`. The compensating control is unchanged and becomes load-bearing: settle-then-rescan with conflict-copy detection (Acquire protocol steps 4-5) and fail-closed on ambiguity. ADR-0001's and `agent-registry.json`'s "cloud-hosted" description of Cowork is superseded by this section (noted here; ADR-0001 is not edited).
 
-**Rule R1 (decided: option (c), Gabriel, 2026-10-17).** Until the lift condition below is met, a Cowork VM session MUST NOT run any tool that creates, reclaims or releases a lock or that drains the event spool: `lease-task`, `complete-task`, `fail-task`, `expire-leases`, and any `emit-event` call that drains. It works SAFE-BY-HAND only (handoffs, spool files, new tasks per COWORK-BOOTSTRAP section 7). This narrows COWORK-BOOTSTRAP section 6, which today grants `MODE = FULL-EXEC` "full parity with Code"; a conforming PR caps Cowork at SAFE-BY-HAND for every lock-mutating operation. The decision takes effect with this amendment's merge (the bootstrap edit follows it).
+**Rule R1 (decided: option (c), Gabriel, 2026-10-17).** Until the lift condition below is met, a Cowork session MUST NOT run **any tool under `tools/` that writes the seam** (creates, replaces, moves or deletes a file there). That includes `lease-task`, `complete-task`, `fail-task`, `expire-leases`, `post-handoff`, `create-task` and `emit-event` (every `emit_event` call drains the spool, so there is no non-draining path), and `publish-contracts`. Read-only tools (for example `validate.py`) remain allowed. Cowork works SAFE-BY-HAND: the three recipes in COWORK-BOOTSTRAP section 7 (post a return handoff, spool one event file, create one new task), each of which only creates a new, randomly-suffixed file. This narrows COWORK-BOOTSTRAP section 6, which today grants `MODE = FULL-EXEC` "full parity with Code".
 
-**Lift condition.** R1 is lifted only by a further, explicit documentation change (not automatically) once **both** hold:
-1. the L0 Cowork probe has reported the mount type and file-identity/link semantics `[PENDING]`, and nothing in it contradicts atomic exclusive-create, `os.link` and rename-over-existing across the mount; and
-2. the V1 OneDrive contention soak (distinct project id, never `ora-ops`) has passed its criteria with Cowork as a contender, or, if the Cowork contender cannot be reproduced within the soak's two-session timebox, R1 stays in force and Cowork remains SAFE-BY-HAND.
+**R1 is honour-system until it is wired.** Nothing in the code distinguishes surfaces (a Cowork session can pass any `--holder`), and Cowork reads the bootstrap and the seam's contracts mirror, not this ADR. R1 binds in practice only when (i) COWORK-BOOTSTRAP sections 6 and 7 are edited and (ii) the contracts mirror is republished. Until both are done R1 is a stated rule, not an enforced one.
 
-Alternatives considered and not chosen: (b) R1 permanently (forgoes Cowork leasing even if the mount proves atomic); (a) keep FULL-EXEC (relies on conflict-copy detection alone for cross-surface correctness).
+**Lift condition.** R1 is lifted only by a further explicit documentation change, never automatically, and only when **both** hold:
+1. the L0 probe has reported the mount type, file-identity and link semantics `[PENDING]`, and nothing in it contradicts atomic exclusive-create, `os.link` and rename-over-existing for Cowork's file operations; and
+2. the V1 soak has passed with Cowork as a contender. If the Cowork contender cannot be reproduced within the soak's two-session timebox, this condition is **not** met and R1 stays in force.
 
-### B. Thresholds are unchanged; the settle must be shorter than the lease (clarification)
+Alternatives considered and not chosen: (b) R1 permanently; (a) keep FULL-EXEC and rely on conflict-copy detection alone.
 
-- The ratified constants (45-minute TTL, 5-minute skew, 30-second settle) are **unchanged** and are defaults, not floors. The CLI rejects only invalid values (zero or negative TTL, negative skew, negative or non-finite settle) plus loose sanity ceilings that prevent arithmetic overflow; the ceilings are implementation guards, not policy. The lease-length cap (`LEASE_TTL_CAP` 45) and expiry ceiling (90) remain ADR-0006 D3's.
-- **Recorded non-change (M03):** the ratified 5-minute skew is *not* enforced as a floor on foreign-lease judging; a caller may pass `--skew-min 0`. This was considered and declined (ballot Q4, option A).
-- **New clarification:** Acquire protocol step 4 (settle) MUST last strictly less than the lease TTL. The lock's `expires` is stamped at step 3, before the settle, so a settle at least as long as the TTL leaves the holder asleep on an already-reclaimable lock, and the conflict path can then archive a legitimate reclaimer's live lock. The default (30 s against 45 min) is unaffected. Enforced at the CLI by PR #17 (merged).
+### B. Thresholds are unchanged; the requested settle must be shorter than the lease (clarification)
 
-### C. Routing is enforced at acquisition (M38)
+- The ratified constants (45-minute TTL, 5-minute skew, 30-second settle) are **unchanged** and are defaults, not floors. The CLI rejects invalid values (zero or negative TTL, negative skew, negative or non-finite settle) plus loose sanity ceilings that prevent arithmetic overflow; the ceilings are implementation guards, not policy. `LEASE_TTL_CAP` (45) and `LEASE_EXPIRY_CEILING` (90) remain ADR-0006 D3's.
+- **Recorded non-change (M03):** the ratified 5-minute skew is *not* enforced as a floor on foreign-lease judging; a caller may pass `--skew-min 0`. Considered and declined (ballot Q4, option A).
+- **Clarification:** the Acquire protocol's `expires` is stamped at step 3, before the step-4 settle, so a requested settle at least as long as the TTL leaves the holder asleep on an already-expired lock (reclaimable once the 5-minute grace passes), and the conflict path could then archive a legitimate reclaimer's live lock. The requested settle MUST therefore be strictly shorter than the TTL. This is enforced **at the CLI only** (`lease-task`, PR #17, merged); library callers of `acquire_lease` are not guarded, and a past `--now` can still mint an already-reclaimable lock. The defaults (30 s against 45 min) are unaffected.
 
-`owner_agent` and `to_agent` are never enforced today: any holder string can lease any task. At Acquire protocol step 1 the acquirer MUST verify that (i) `holder` is an active agent in `agent-registry.json`, and (ii) if `task.owner_agent` is not `unassigned`, `holder` equals it. An unreadable or invalid registry denies the acquisition (fail-closed) with a `LeaseDenied` event carrying the reason. Takes effect only when the conforming code merges.
+### C. Routing is enforced at acquisition (M38, ballot Q11-A)
+
+`owner_agent` is never enforced today: any holder string can lease any task. Before **any lock I/O** at the start of the Acquire protocol (so an unregistered holder can never archive an incumbent's expired lock before being denied), the acquirer MUST verify that (i) `holder` is an active agent in `agent-registry.json`, and (ii) if `task.owner_agent` is not `unassigned`, `holder` equals it. An unreadable or invalid registry denies the acquisition (fail-closed).
+
+- **Denial event.** A routing denial emits `LeaseDenied` with actor `system` and the offending holder and reason in `detail`/`refs.reason`, never with the offending holder as the event's `actor`, because AMD-0004 section D validates `actor` against the registry and would quarantine it.
+- **`to_agent` is deliberately not enforced here.** It is a handoff field; routing of handoffs belongs to inbound-trust validation (B3a). Deferral recorded.
+- **Interaction with R1 (ballot, 2026-10-17: handoff-only).** While R1 holds, a task with `owner_agent: cowork` is **not leasable by anyone**: Cowork is barred from lock tools and Claude Code is denied by routing. This is intended. Cowork acts on such tasks only through handoffs and spool files (how its one recorded session worked); the task state advances by Code-side action on Cowork's return handoff. The routing check exempts nothing.
+- Takes effect only when the conforming code merges.
 
 ## Consequences of this amendment
 
-| File | Conforming change | PR |
+| File | Conforming change | When |
 |---|---|---|
-| `docs/COWORK-BOOTSTRAP.md` section 6 | Cap lock-mutating operations at SAFE-BY-HAND (R1, option c), with the lift condition | after ratification |
-| `tools/_aaos_common.py` `acquire_lease` | Routing check at step 1 (section C) | after ratification |
+| `docs/COWORK-BOOTSTRAP.md` sections 6 and 7 | Cap Cowork at SAFE-BY-HAND for every seam-writing tool (R1), state the lift condition | after ratification |
+| Seam contracts mirror (`publish-contracts`) | Republish the edited bootstrap so Cowork actually reads R1 | after the bootstrap edit |
+| `agent-registry.json` cowork entry | Replace "cloud-hosted agent surface" with the verified description (local, per-session VM) | after ratification; republish with the mirror |
+| `tools/_aaos_common.py` `acquire_lease` | Routing check before any lock I/O (section C) | after ratification |
+| `schemas/event.schema.json` | `refs.reason` (ballot Q5-A) so the routing denial can carry a reason | with the S0 schema PR |
 | `tools/lease-task.py` | Reject `--settle-sec >= --ttl-min x 60` | PR #17 (merged) |
 | `docs/AAOS-SPEC.md` section 7 | Cross-reference this amendment | after ratification |
 
 ## Verification (additions)
 
-1. Routing: a holder not in the registry is denied; a registered holder on a task owned by another agent is denied; an `unassigned` task is leasable by any registered holder; an unreadable registry denies.
+1. Routing: an unregistered holder is denied before any lock file is touched (assert the incumbent's lock is byte-unchanged); a registered holder on a task owned by another agent is denied; an `unassigned` task is leasable by any registered holder; an unreadable registry denies; the denial event's actor is `system`.
 2. Settle bound: `--settle-sec` equal to or above `--ttl-min x 60` exits 2 (covered by PR #17's tests).
-3. R1: a documented check that the Cowork bootstrap never instructs a lock-mutating tool, and that FULL-EXEC is capped as above, until the lift condition is recorded as met.
+3. R1: a documented check that the bootstrap never instructs a seam-writing tool outside the three SAFE-BY-HAND recipes, and that FULL-EXEC is capped as above, until the lift condition is recorded as met.
+
+### Ratification record
+Pending. In a small commit made immediately before merge, this block is replaced with `Ratified by Gabriel, <date>, scope: <sections>, PR #18`, and the PROPOSED banner at the top of this file's Status section is replaced in the same commit. Code PRs cite that merge commit.
