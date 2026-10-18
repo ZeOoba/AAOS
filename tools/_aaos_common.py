@@ -1290,6 +1290,43 @@ def _release_drain_lock(lock_path: Path) -> None:
     # event is ever at risk from a release failure, only drain latency.
 
 
+_PENDING_READ_ATTEMPTS = 3
+
+
+def _read_pending_text(p: Path):
+    """Read one pending event file. Returns (status, value):
+      ("ok", text)               -- readable
+      ("vanished", None)         -- FileNotFoundError
+      ("undecodable", exc)       -- the bytes are not valid UTF-8: genuinely corrupt, never a transient fault
+      ("transient", exc)         -- any other OSError that persisted through a short bounded retry"""
+    for attempt in range(_PENDING_READ_ATTEMPTS):
+        try:
+            return "ok", p.read_text(encoding="utf-8")
+        except FileNotFoundError:
+            return "vanished", None
+        except UnicodeDecodeError as exc:
+            return "undecodable", exc
+        except OSError as exc:
+            if attempt < _PENDING_READ_ATTEMPTS - 1:
+                time.sleep(0.005)
+                continue
+            return "transient", exc
+
+
+def _quarantine_pending(p: Path, name: str, corrupt_dir: Path, why) -> None:
+    """Move a pending file that WAS read and is genuinely bad to pending/_corrupt/ (never deleted)."""
+    os.makedirs(corrupt_dir, exist_ok=True)
+    target = corrupt_dir / name
+    try:
+        os.replace(str(p), str(target))
+    except OSError:
+        pass
+    print(
+        f"WARNING: malformed pending event file moved to {target} (not folded, not lost): {why}",
+        file=sys.stderr,
+    )
+
+
 def drain_event_spool(project_id, *, root: str | None = None, now: datetime | None = None) -> int:
     """Fold all committed-but-undrained pending events into the NDJSON.
 
@@ -1357,9 +1394,8 @@ def drain_event_spool(project_id, *, root: str | None = None, now: datetime | No
 
         for name in names:
             p = spool_dir / name
-            try:
-                raw = p.read_text(encoding="utf-8")
-            except FileNotFoundError:
+            status, raw = _read_pending_text(p)
+            if status == "vanished":
                 # Listed a moment ago, gone now. We hold the exclusive drain
                 # lock, so nothing should be moving pending files out from
                 # under us: this is the signature of a SECOND drainer, which
@@ -1374,17 +1410,19 @@ def drain_event_spool(project_id, *, root: str | None = None, now: datetime | No
                     file=sys.stderr,
                 )
                 continue
-            except OSError as exc:
-                os.makedirs(corrupt_dir, exist_ok=True)
-                target = corrupt_dir / name
-                try:
-                    os.replace(str(p), str(target))
-                except OSError:
-                    pass
+            if status == "transient":
+                # A read error is NOT evidence the event is bad (a OneDrive or antivirus sharing
+                # violation is the everyday cause). Quarantining it here used to move a valid event
+                # to _corrupt/, which no reader looks at. Leave it in pending/: it stays visible to
+                # read_events and the next drain retries it.
                 print(
-                    f"WARNING: unreadable pending event file moved to {target} (not folded, not lost): {exc}",
+                    f"WARNING: pending event file {name} could not be read ({raw}); leaving it in "
+                    "pending/ for the next drain (not folded, not lost)",
                     file=sys.stderr,
                 )
+                continue
+            if status == "undecodable":
+                _quarantine_pending(p, name, corrupt_dir, f"not valid UTF-8: {raw}")
                 continue
 
             try:
@@ -1392,16 +1430,7 @@ def drain_event_spool(project_id, *, root: str | None = None, now: datetime | No
                 if not isinstance(event, dict) or not event.get("event_id"):
                     raise ValueError("pending event missing event_id or not an object")
             except (json.JSONDecodeError, ValueError) as exc:
-                os.makedirs(corrupt_dir, exist_ok=True)
-                target = corrupt_dir / name
-                try:
-                    os.replace(str(p), str(target))
-                except OSError:
-                    pass
-                print(
-                    f"WARNING: malformed pending event file moved to {target} (not folded, not lost): {exc}",
-                    file=sys.stderr,
-                )
+                _quarantine_pending(p, name, corrupt_dir, exc)
                 continue
 
             if event["event_id"] not in existing_ids:
@@ -1472,7 +1501,7 @@ def read_events(project_id, *, root: str | None = None) -> list[dict]:
         for name in sorted(p.name for p in spool_dir.iterdir() if p.is_file() and p.name.endswith(".json")):
             try:
                 event = json.loads((spool_dir / name).read_text(encoding="utf-8"))
-            except (OSError, json.JSONDecodeError):
+            except (OSError, ValueError):  # ValueError covers JSONDecodeError and UnicodeDecodeError
                 continue
             if not isinstance(event, dict):
                 continue

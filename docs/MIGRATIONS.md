@@ -27,3 +27,8 @@ The queue CLIs now reject invalid inputs with exit 2 *before* any lock, lease, e
 - `--now` must also fall in years 1970-9000. An extreme year made later `now +/- timedelta(...)` arithmetic raise `OverflowError` (exit 1 'UNEXPECTED ERROR') instead of a usage error.
 - `publish-notion.py` writes the validated `--now` back with `datetime.isoformat()`, so non-canonical inputs are normalized in the page title (`...Z` becomes `...+00:00`, a space separator becomes `T`).
 - Callers to check: any recipe or scheduled-task command line that passes a naive `--now` or a zero/negative value. The scheduled `ora-aaos-expire-leases` sweep runs `expire-leases.py --project ora-ops` with defaults only, so it is unaffected; verify with one supervised run after merge.
+
+### 2026-10-17 -- event drain: a read error never quarantines a valid event (independent-review finding)
+- `drain_event_spool` used to move a pending event file to `pending/_corrupt/` on ANY `OSError` while reading it (a OneDrive or antivirus sharing violation is the everyday cause). Nothing reads `_corrupt/`, so a valid event vanished from every view. It now retries a few times inside the drain and then leaves the file in `pending/` (warning names the file); the next drain retries it, and `read_events` keeps showing it meanwhile.
+- A pending file that is not valid UTF-8 used to raise `UnicodeDecodeError` out of `drain_event_spool` and `read_events`, so one such file (it sorts first) wedged every later drain and crashed every reader. It is now quarantined to `_corrupt/` like other malformed files, and `read_events` skips it.
+- Files that were read and are malformed JSON, not an object, or lack `event_id` are quarantined exactly as before.
