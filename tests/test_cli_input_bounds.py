@@ -86,30 +86,68 @@ class NaiveNowRejectedByEveryCli(_Invoker):
                 self.assertIn("USAGE ERROR", out)
                 self.assertIn("--now", out)
 
+    def test_extreme_years_are_usage_errors_not_overflow(self):
+        """Review finding: `lease-task --now 9999-12-31T23:30:00+00:00` died with OverflowError (exit 1)
+        and `expire-leases --now 0001-01-01... --skew-min 525600` likewise."""
+        for tool, argv in (("lease-task.py", MINIMAL_ARGV["lease-task.py"]), ("expire-leases.py", ["--dry-run"])):
+            for bad in ("9999-12-31T23:30:00+00:00", "0001-01-01T00:00:00+00:00", "1969-12-31T23:59:59+00:00"):
+                with self.subTest(tool=tool, now=bad):
+                    code, out = self.invoke(tool, *argv, "--now", bad)
+                    self.assertEqual(code, 2, out)
+                    self.assertIn("USAGE ERROR", out)
+                    self.assertIn("supported range", out)
+
+    def test_year_range_boundaries_are_accepted(self):
+        for ok in ("1970-01-01T00:00:00+00:00", "9000-12-31T23:59:59+00:00"):
+            with self.subTest(now=ok):
+                self.assertEqual(aaos.parse_cli_now(ok).isoformat(), ok)
+
     def test_aware_now_still_accepted_positive_control(self):
         code, out = self.invoke("expire-leases.py", "--dry-run", "--now", _iso(NOW))
         self.assertEqual(code, 0, out)
 
 
 class _FromisoformatSites(ast.NodeVisitor):
-    """Collect every `<x>.fromisoformat(...)` call with its innermost enclosing function name
-    ('<module>' for module-level code, so a bare module-level call cannot hide)."""
+    """Collect EVERY reference to `fromisoformat` with its qualified enclosing scope ('<module>' for
+    module-level code, 'Class.method' for methods). References, not just calls: `fi = d.fromisoformat`,
+    `map(d.fromisoformat, xs)` and `getattr(d, 'fromisoformat')` would evade a Call-only scan."""
 
     def __init__(self):
-        self.scope = ["<module>"]
+        self.scope = []
         self.sites = []
 
-    def _enter(self, node):
+    def _qual(self):
+        return ".".join(self.scope) or "<module>"
+
+    def _function(self, node):
+        for d in node.decorator_list:
+            self.visit(d)
+        self.visit(node.args)  # defaults and annotations belong to the OUTER scope
+        if node.returns:
+            self.visit(node.returns)
         self.scope.append(node.name)
-        self.generic_visit(node)
+        for stmt in node.body:
+            self.visit(stmt)
         self.scope.pop()
 
-    visit_FunctionDef = visit_AsyncFunctionDef = _enter
+    visit_FunctionDef = visit_AsyncFunctionDef = _function
 
-    def visit_Call(self, node):
-        if isinstance(node.func, ast.Attribute) and node.func.attr == "fromisoformat":
-            self.sites.append((self.scope[-1], node.lineno))
+    def visit_ClassDef(self, node):
+        for e in node.decorator_list + node.bases + [k.value for k in node.keywords]:
+            self.visit(e)
+        self.scope.append(node.name)
+        for stmt in node.body:
+            self.visit(stmt)
+        self.scope.pop()
+
+    def visit_Attribute(self, node):
+        if node.attr == "fromisoformat":
+            self.sites.append((self._qual(), node.lineno))
         self.generic_visit(node)
+
+    def visit_Constant(self, node):
+        if node.value == "fromisoformat":  # getattr(d, 'fromisoformat'); docstrings are longer strings
+            self.sites.append((self._qual(), node.lineno))
 
 
 class NoDirectFromisoformatOutsideTheParser(unittest.TestCase):
@@ -118,21 +156,32 @@ class NoDirectFromisoformatOutsideTheParser(unittest.TestCase):
         visitor.visit(ast.parse(source, filename=filename))
         return visitor.sites
 
-    def test_fromisoformat_only_called_inside__parse_iso_dt(self):
+    def test_fromisoformat_only_referenced_inside__parse_iso_dt(self):
         found = []
         for path in sorted(TOOLS_DIR.glob("*.py")):
-            for fn, _line in self._scan(path.read_text(encoding="utf-8"), str(path)):
-                found.append((path.name, fn))
+            for scope, _line in self._scan(path.read_text(encoding="utf-8"), str(path)):
+                found.append((path.name, scope))
         self.assertEqual(sorted(found), [("_aaos_common.py", "_parse_iso_dt")])
 
-    def test_scanner_sees_module_level_and_nested_calls(self):
-        """The guard must not have blind spots: module-level calls and calls inside a nested helper
-        are reported against the right scope."""
-        module_level = "from datetime import datetime\nx = datetime.fromisoformat('2026-01-01')\n"
-        self.assertEqual([fn for fn, _ in self._scan(module_level)], ["<module>"])
-        nested = ("def _parse_iso_dt(v):\n    def helper(s):\n        return datetime.fromisoformat(s)\n"
-                  "    return helper(v)\n")
-        self.assertEqual([fn for fn, _ in self._scan(nested)], ["helper"])
+    def test_scanner_has_no_blind_spots(self):
+        cases = {
+            "module-level call": ("x = datetime.fromisoformat('2026-01-01')\n", ["<module>"]),
+            "alias then call": ("fi = datetime.fromisoformat\nfi('2026-01-01')\n", ["<module>"]),
+            "passed as a callable": ("list(map(datetime.fromisoformat, xs))\n", ["<module>"]),
+            "getattr by name": ("getattr(datetime, 'fromisoformat')('2026-01-01')\n", ["<module>"]),
+            "nested helper": ("def _parse_iso_dt(v):\n    def helper(s):\n        return d.fromisoformat(s)\n"
+                              "    return helper(v)\n", ["_parse_iso_dt.helper"]),
+            "same-named method is not the allowed function": (
+                "class C:\n    def _parse_iso_dt(self, v):\n        return d.fromisoformat(v)\n", ["C._parse_iso_dt"]),
+            "default argument belongs to the outer scope": (
+                "def f(parse=datetime.fromisoformat):\n    return parse\n", ["<module>"]),
+        }
+        for label, (source, expected) in cases.items():
+            with self.subTest(label):
+                self.assertEqual([scope for scope, _ in self._scan(source)], expected)
+
+    def test_docstring_mentions_are_not_references(self):
+        self.assertEqual(self._scan('def f():\n    """uses fromisoformat internally"""\n'), [])
 
 
 class LeaseTaskFlagBounds(_Invoker):
@@ -208,6 +257,25 @@ class LeaseTaskFlagBounds(_Invoker):
                 self.assertIn(flag, out)
                 self.assertFalse(lock.exists())
                 self.assertEqual(self.reload_task("t-bounds")["state"], "queued")
+
+    def test_settle_must_be_shorter_than_the_lease_it_settles(self):
+        """The lock's expiry is stamped before the settle sleep, so a settle >= the TTL leaves the
+        holder asleep while its own lock is already reclaimable (review finding)."""
+        lock = self._seed_queued()
+        for ttl, settle in (("1", "60"), ("1", "61"), ("45", "2700"), ("45", "3000")):
+            with self.subTest(ttl=ttl, settle=settle):
+                code, out = self.invoke("lease-task.py", *self._lease_argv(
+                    "t-bounds", "--ttl-min", ttl, "--settle-sec", settle))
+                self.assertEqual(code, 2, out)
+                self.assertIn("--settle-sec", out)
+                self.assertIn("--ttl-min", out)
+                self.assertFalse(lock.exists())
+
+    def test_settle_just_under_the_ttl_is_allowed(self):
+        self._seed_queued("t-just-under")
+        code, out = self.invoke("lease-task.py", *self._lease_argv(
+            "t-just-under", "--ttl-min", "1", "--settle-sec", "0.2"))
+        self.assertEqual(code, 0, out)
 
     def test_the_ceilings_themselves_are_accepted(self):
         self._seed_queued("t-edge")

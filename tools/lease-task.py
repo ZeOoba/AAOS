@@ -68,6 +68,14 @@ def main(argv=None) -> int:
 
     try:
         resolved_now = _resolve_now(args.now)
+        # The lock's `expires` is stamped BEFORE the settle sleep. A settle that lasts as long as the
+        # lease would leave the holder asleep while its own lock is already reclaimable, and the
+        # conflict path would then archive a legitimate reclaimer's live lock.
+        if args.settle_sec >= args.ttl_min * 60:
+            raise aaos.UsageError(
+                f"--settle-sec ({args.settle_sec:g}) must be shorter than the lease it settles "
+                f"(--ttl-min {args.ttl_min} = {args.ttl_min * 60} s)"
+            )
         aaos.require_seam_reachable(args.seam_root)
         task = aaos.load_task(args.task_id, args.project, root=args.seam_root)
         lease = task.get("lease")

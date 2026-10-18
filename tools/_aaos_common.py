@@ -456,6 +456,10 @@ def _parse_iso_dt(value) -> datetime:
     return dt
 
 
+MIN_CLI_NOW_YEAR = 1970
+MAX_CLI_NOW_YEAR = 9000
+
+
 def parse_cli_now(now_str, flag: str = "--now") -> datetime:
     """Resolve a CLI `--now` value. Empty/None means the real clock (timezone-aware).
 
@@ -466,9 +470,15 @@ def parse_cli_now(now_str, flag: str = "--now") -> datetime:
     if not now_str:
         return datetime.now().astimezone()
     try:
-        return _parse_iso_dt(now_str)
+        value = _parse_iso_dt(now_str)
     except CorruptStateError as exc:
         raise UsageError(f"{flag}: {exc}") from exc
+    # Sanity range: an extreme year makes the later `now +/- timedelta(...)` arithmetic overflow
+    # (exit 1 'UNEXPECTED ERROR') instead of failing as a usage error.
+    if not (MIN_CLI_NOW_YEAR <= value.year <= MAX_CLI_NOW_YEAR):
+        raise UsageError(f"{flag}: year {value.year} is outside the supported range "
+                         f"{MIN_CLI_NOW_YEAR}-{MAX_CLI_NOW_YEAR}")
+    return value
 
 
 # argparse `type=` validators for CLI numeric flags (audit M03). They reject INVALID values only; the

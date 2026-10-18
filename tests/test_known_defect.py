@@ -38,6 +38,18 @@ class KnownDefectSemantics(unittest.TestCase):
         self.assertIn("KNOWN DEFECT still present", warns[0])
         self.assertIn("pinned bug", warns[0])
 
+    def test_a_still_present_defect_does_not_fail_under_warnings_as_errors(self):
+        class Inner(unittest.TestCase):
+            @known_defect("pinned bug")
+            def test_it(self):
+                invariant(False, "still broken")
+
+        result = unittest.TestResult()
+        with warnings.catch_warnings():
+            warnings.simplefilter("error")
+            unittest.defaultTestLoader.loadTestsFromTestCase(Inner).run(result)
+        self.assertTrue(result.wasSuccessful(), result.errors)
+
     def test_unrelated_exceptions_are_real_errors_not_expected_failures(self):
         for exc in (AttributeError("renamed"), TypeError("signature changed"), AssertionError("hook never fired")):
             with self.subTest(exc=type(exc).__name__):

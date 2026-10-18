@@ -58,6 +58,9 @@ class DrainLockStealInterleavingTests(unittest.TestCase):
         p = mock.patch.object(aaos, "DEFAULT_SEAM_ROOT", str(self.sentinel))
         p.start()
         self.addCleanup(p.stop)
+        e = mock.patch.dict(os.environ, {"AAOS_SEAM_ROOT": str(self.sentinel)})  # seam_root() reads this first
+        e.start()
+        self.addCleanup(e.stop)
         self.addCleanup(lambda: self.assertFalse(self.sentinel.exists(), "live default seam was resolved"))
 
         self.lock = aaos._drain_lock_path(PROJECT, root=self.root)

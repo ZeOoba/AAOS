@@ -37,7 +37,11 @@ def known_defect(reason: str):
             try:
                 fn(self, *args, **kwargs)
             except InvariantViolated as exc:
-                warnings.warn(f"KNOWN DEFECT still present in {fn.__name__}: {reason} ({exc})", stacklevel=2)
+                # Visible in the run output, but never an error: `python -W error` (or PYTHONWARNINGS=error)
+                # must not turn a still-present known defect into a red suite.
+                with warnings.catch_warnings():
+                    warnings.simplefilter("default")
+                    warnings.warn(f"KNOWN DEFECT still present in {fn.__name__}: {reason} ({exc})", stacklevel=2)
                 return
             self.fail(
                 f"{fn.__name__}: the known defect ({reason}) appears FIXED -- every invariant held. "

@@ -46,6 +46,10 @@ class _SeamGuardedCase(unittest.TestCase):
         patcher = mock.patch.object(aaos, "DEFAULT_SEAM_ROOT", str(self.sentinel))
         patcher.start()
         self.addCleanup(patcher.stop)
+        # seam_root() consults $AAOS_SEAM_ROOT before the default, so guard that route too.
+        env_patcher = mock.patch.dict(os.environ, {"AAOS_SEAM_ROOT": str(self.sentinel)})
+        env_patcher.start()
+        self.addCleanup(env_patcher.stop)
         self.addCleanup(self._assert_live_default_not_resolved)
 
     def _assert_live_default_not_resolved(self):
@@ -171,11 +175,20 @@ class AssertLeaseHeldCharacterization(_SeamGuardedCase):
             "task_ref": "t-lock-disagrees", "holder": "cowork", "session": "sess-B",
             "acquired": now.isoformat(), "expires": (now + timedelta(minutes=45)).isoformat(),
         }), encoding="utf-8")
-        raised = False
-        try:
-            aaos.assert_lease_held(task, "claude-code", "sess-A", now=now)
-        except aaos.LeaseLostError:
-            raised = True
+        # Precondition: a fixed implementation that resolves the lock through the default seam (the
+        # only route the current signature allows) MUST find the lock planted above. Point the default
+        # resolution at this temp tree and prove it lands on the planted file; otherwise a correct fix
+        # would read a different tree, see no lock, and the invariant below would hold or fail for the
+        # wrong reason.
+        with mock.patch.dict(os.environ, {"AAOS_SEAM_ROOT": str(self.tmp)}):
+            planted = aaos.lock_path("t-lock-disagrees", PROJECT)
+            self.assertEqual(planted, lock_dir / "t-lock-disagrees.lock")
+            self.assertTrue(planted.exists(), "the planted lock is not where default resolution looks")
+            raised = False
+            try:
+                aaos.assert_lease_held(task, "claude-code", "sess-A", now=now)
+            except aaos.LeaseLostError:
+                raised = True
         invariant(raised, "assert_lease_held returned normally although the lock file names another holder")
 
 
