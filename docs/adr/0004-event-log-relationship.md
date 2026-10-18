@@ -28,55 +28,69 @@ The "Decision" section above described the NDJSON write path as mtime-guarded-re
 
 The mechanism was redesigned: **spooling is now the unconditional first step and the true commit point** for every event — a uniquely-named spool file (incorporating pid + a random component, collision-free by construction across any number of concurrent writers on any number of hosts) is durably written before the NDJSON is touched at all. Folding the spool into the canonical NDJSON is a second, independent step, serialized by an `O_EXCL`-acquired drain lock (with a staleness-based reclaim so a crashed drainer can't wedge future drains); a process that can't acquire the drain lock simply leaves its event safely spooled for the next successful drain, by itself or anyone else. This still honors this ADR's core commitments unchanged — one NDJSON per project, oldest-first, no duplication into `event_log.md`, the same by-reference linkage — it only replaces the specific write-path mechanics that turned out not to hold under concurrent access, which is the very thing this coordination layer exists to support. Full account: `docs/PHASE3-DESIGN.md` §1.10 and `docs/GATE3-REVIEW.md`.
 
-
 ## Amendment — 2026-10-17 (AMD-0004: drain-lock steal, fold invariant, ordering, inbound validation, commit failure, milestone mirror)
 
-**Status of this amendment: PROPOSED. RED, docs-only. Not in force until Gabriel ratifies it and this PR merges.** It changes no code; each conforming change lands in a separate PR that cites this amendment's merge commit. Sources: audit findings M01, M07, M08, M22, M24, M25 and the hardened improvement plan (PR #13). Companion amendments: AMD-0003 (ADR-0003) and AMD-0006 (ADR-0006).
+**Status of this amendment: PROPOSED. RED, docs-only. Not ratified until the ratification record at the end of this section is filled in.** It changes no code; each conforming change lands in a separate PR that cites the merge commit of the *ratified* text. Sources: audit findings M01, M07, M08, M22, M24, M25 and the hardened improvement plan (PR #13). Companion amendments: AMD-0003 (ADR-0003) and AMD-0006 (ADR-0006). Revised after an independent adversarial review (the first draft's fold invariant, validation rule and commit-failure semantics were each refuted; the corrections are folded in below).
 
-### A. The drain lock's stale takeover is a compare-and-swap, not an archive by path
+### A. The drain lock's stale takeover and release use the shared ownership-transfer primitive
 
-The 2026-07-10 Revision above specifies an `O_EXCL` drain lock "with a staleness-based reclaim". The implemented reclaim archives whatever sits at the lock *path* (`os.replace`), so two drainers that both judge the same lock stale can both take it: the second moves the first's **live** lock aside, and both fold from different snapshots. Ownership of the drain lock therefore transfers by the **same single compare-and-swap primitive** ADR-0006 D2 defines for lease locks (see AMD-0006): an exclusively-created, expiring reclaim token held across read, judge and swap; the canonical lock path never vacated; and a release that is **content-verified** (a holder never deletes a successor's lock). A holder that discovers its lock was replaced stops folding and leaves its spool files pending.
+The 2026-07-10 Revision above specifies an `O_EXCL` drain lock "with a staleness-based reclaim". The implemented reclaim archives whatever sits at the lock *path* (`os.replace`), so two drainers that judge the same lock stale can both take it, and the release is an unconditional unlink by path, so a stalled holder deletes its successor's lock. Ownership of the drain lock therefore transfers, and is released, by the **single primitive specified in AMD-0006** (an exclusively-created, expiring reclaim token serializing every mutator of an existing lock file; a content-verified swap; a content-verified release). That primitive is **not** a true compare-and-swap: AMD-0006 records its residual window (a holder that stalls past the token's expiry between its last verification and the swap) as an accepted, bounded risk. A holder that discovers its lock was replaced stops folding and leaves its spool files pending.
 
-### B. Restated fold invariant
+### B. Restated fold invariant, defined over what readers can see
 
-The invariant "exactly one drainer folds" is not achievable on a synced folder and is replaced by one that is testable:
+"Exactly one drainer folds" is not achievable on a synced folder. The invariant is:
 
-> **No event is ever absent from the union of the NDJSON log, `pending/` and `_drained/`; duplicates are removed by `event_id`; and the NDJSON is never replaced from a stale base.**
+> **Every committed event is, at every instant, present in exactly one of: the NDJSON log, `pending/`, or (flagged) `_corrupt/`. `_drained/` holds only spool files whose events are already in the NDJSON; it is an audit copy and never a place an event can exist alone. Duplicates are removed by `event_id` at read time.**
 
-Mechanism: immediately before the final `os.replace` the drainer re-hashes the NDJSON; if it changed since the read, it aborts the fold and leaves the spool files pending. Spool files are moved to `_drained/` only after the replace succeeds.
+Mechanism, separating what is current from what is new:
+
+- *Current, unchanged:* a spool file is moved to `_drained/` only after the NDJSON `os.replace` succeeded.
+- *New:* immediately before the final `os.replace` the drainer re-hashes the NDJSON and, if it changed since the read, aborts the fold and leaves the spool files pending. This **narrows** the stale-base window; it does not close it (a second drainer can list `pending/`, miss an event spooled afterwards, and replace from its stale base after the first drainer has already moved that event to `_drained/`).
+- *New:* `read_events` reports every `_corrupt/` entry as flagged (count and names) instead of ignoring the folder, and a health check reconciles `_drained/` against the NDJSON by `event_id`. Any `_drained/` event missing from the NDJSON is the residual loss; repair is a supervised re-fold (copy the file back to `pending/`).
+- *New requirement:* **a transient error never quarantines.** An `OSError` while reading, parsing or moving a pending file (a OneDrive or antivirus sharing violation) leaves the file in `pending/` to be retried at the next drain. Only a file that is readable and fails JSON or schema validation goes to `_corrupt/`. (Today a single transient error moves a valid event to `_corrupt/`, where no reader looks; reproduced during review. It is fixed first, by a separate test-first PR.)
 
 ### C. Ordering: `read_events` is the canonical ordered view
 
-AAOS-SPEC section 8 says the log is "appended oldest-first". Within one drain batch events are folded oldest-first, but **file order across batches is not time order**: Code spool files are named `<time_ns>-<pid>-<uuid>.json` while Cowork's SAFE-BY-HAND recipe names them `<sortable-timestamp>-cowork-<random>.json`, which sort after every Code file, and the two surfaces stamp different UTC offsets. The canonical ordered view is `read_events`, which de-duplicates by `event_id` and sorts by **parsed** timestamp (ties keep NDJSON-then-pending order; unparseable timestamps sort last). Consumers MUST use it and MUST NOT rely on file position. A conforming change fixes the Cowork filename convention in COWORK-BOOTSTRAP and tolerates a late earlier-timestamp arrival.
+AAOS-SPEC section 8 says the log is "appended oldest-first". **File order is never time order**, within a drain batch or across batches: a batch is folded in file-name order, Code spool files are named `<time_ns>-<pid>-<uuid>.json`, and Cowork's SAFE-BY-HAND recipe names them `<sortable-timestamp>-cowork-<random>.json`, which sorts after every Code file, and the two surfaces may stamp different UTC offsets. The canonical ordered view is `read_events`, which de-duplicates by `event_id` and sorts by **parsed** timestamp (ties keep NDJSON-then-pending order; unparseable timestamps sort last). Consumers MUST use it and MUST NOT rely on file position. A conforming change fixes the Cowork filename convention in COWORK-BOOTSTRAP and tolerates a late earlier-timestamp arrival.
 
 ### D. Inbound events are validated, prospectively
 
-Events written by hand by a non-Code surface are folded today without schema, actor or trust validation. The drain MUST validate each pending file (schema, `actor` in the agent registry, `event_id` shape) with this rollout:
+Events written by hand by a non-Code surface are folded today without schema, actor or trust validation. The drain MUST validate each pending file: schema, `event_id` shape, and `actor` in **the agent registry or the literal `system`** (the schema defines `system` for the sweep, and Code's own events use it; the aggregated escalation below is itself emitted as `system`). Rollout:
 
-1. **Census (read-only).** The validator runs over a *copy* of the live log, `pending/` and `_drained/` and reports counts by reason. The copy requires Gabriel's in-turn approval.
-2. **Shadow mode.** Invalid events are tagged, one aggregated `Escalated(reason=InboundInvalid, count=N)` is emitted per drain **after** the drain lock is released, built only from sanitized fixed fields, and the events are still folded.
-3. **Hard mode** applies only to pending files drained after a **recorded cutover timestamp**. Anything before it is **flagged, never dropped**: `read_events` never filters, and rejected files go to `_corrupt/` with a supervised `readmit` path.
+1. **Census (read-only).** The validator runs over a *copy* of the live log, `pending/` and `_drained/` and reports counts by reason. The copy requires Gabriel's in-turn approval. The census records an **inventory of the spool file names present at that moment**.
+2. **Shadow mode.** Invalid events are tagged; one aggregated `Escalated` (`refs.reason` = `InboundInvalid`, the count in `detail`) is emitted per drain **after** the drain lock is released, built only from sanitized fixed fields; the events are still folded.
+3. **Hard mode** applies only to spool files **not in the recorded inventory** (that is, first seen after the cutover). Files that were already pending at cutover are grandfathered: validated in shadow mode however late they are drained, so a legitimate event in flight is never rejected. A rejected file goes to `_corrupt/`, which `read_events` now surfaces as flagged (section B); a supervised `readmit` path moves it back to `pending/`.
 4. If the registry is unreadable the drain **skips** (events stay pending); it never rejects on a read failure.
 
-### E. A committed event whose state rename fails is compensated, not left as a divergence
+### E. A committed event whose state rename fails is rolled forward, not left as an unexplained divergence
 
-The "one remaining hairline case" above (event committed, state rename fails) is now specified. Before each retry the committer re-verifies that its lease is still held and that the state file is byte-unchanged (otherwise it aborts, which removes the lost-update hazard). The retry budget is elapsed time, not a count. On exhaustion the staged temp file is **kept for supervised replay** and `Escalated(reason=StateCommitFailed, refs.event_id=<the committed event>)` is emitted; `fail-task` and the projection treat the referenced event as superseded when deriving state, and the queue health check reports any remaining event-versus-state divergence as needs-action.
+The "one remaining hairline case" above (the event commits, the state rename fails) is specified as **roll-forward**, consistent with the event being the commit point:
 
-### F. Recorded deviation: the milestone mirror writes the human side only (ballot Q8, option A)
+- Before each retry, a lease-bearing caller (`complete-task`, `fail-task`, `post-handoff`) re-verifies its lease (against the lock file, per ADR-0006 D1) and that the state file is byte-unchanged; a caller with no lease (`create-task`, the `expire-leases` sweep) re-verifies only the state-file precondition (unchanged, or still absent for create). Failure aborts the retry. The retry budget is elapsed time, not a count.
+- On exhaustion the staged temp file is **kept**, and an `Escalated` event is emitted with `refs.reason` = `StateCommitFailed` and `refs.event_id` = the committed event.
+- The committed event is **not** marked superseded. The divergence is reported ("committed, unapplied") until a supervised replay applies the staged state, or an operator **abandons** the transaction, which emits `Escalated` with `refs.reason` = `StateCommitAbandoned`; only abandonment makes `fail-task` and the projection treat the event as superseded.
+- **Schema.** `refs` is closed (`task`, `handoff`, `lock`, `escalation`). This section needs `refs.reason` (already ratified, ballot Q5-A) **and a new `refs.event_id` field, which is NOT yet ratified**; counts travel in `detail` as text, so no `count` field is needed. `[RATIFICATION REQUIRED: refs.event_id]`.
 
-The Decision above requires each `event_log.md` milestone to have a paired NDJSON milestone event carrying `event_log_ref`. No producer exists, and adding one adds a new writer to the seam. **Deviation, with its reason:** the milestone roll-up writes only the `event_log.md` side (through `append-event-log.py`, citing the AAOS `event_id`/`task_ref`); the paired NDJSON event and `event_log_ref` field are deferred to V2. The link remains one-directional by reference.
+### F. Recorded deviation: the milestone mirror writes the human side only (ballot Q8, option A, reason corrected)
+
+The Decision above requires each `event_log.md` milestone to have a paired NDJSON milestone event carrying `event_log_ref`. **No automated producer calls it**, but the means exist: `emit-event.py --event-log-ref` writes such an event through the ordinary spool-and-drain writer today. The earlier statement that a producer "adds a new writer to the seam" was wrong and is withdrawn. **Deviation, retained for a different reason:** the milestone roll-up writes only the `event_log.md` side (through `append-event-log.py`, citing the AAOS `event_id`/`task_ref`); wiring an automated caller of `emit-event.py --event-log-ref` is deferred to V2 so this effort adds no new automated seam writer. The link remains one-directional by reference.
 
 ## Consequences of this amendment
 
 | File | Conforming change |
 |---|---|
-| `tools/_aaos_common.py` | Drain-lock acquire/release on the shared primitive (A); pre-replace re-hash guard (B); validation hook (D); commit retry and compensation (E) |
-| `tools/emit-event.py`, `tools/fail-task.py`, `tools/project-notion.py` | Honour the `StateCommitFailed` supersession (E) |
-| `schemas/event.schema.json`, `docs/MIGRATIONS.md`, `docs/COWORK-BOOTSTRAP.md` | Enumerated `refs.reason` vocabulary (`InboundInvalid`, `StateCommitFailed`), Cowork spool filename and bootstrap type-list sync (C, D, E) |
+| `tools/_aaos_common.py` | Drain-lock acquire and release on the shared primitive (A); pre-replace re-hash guard, reconciliation, no quarantine on transient errors (B); validation hook and grandfathering inventory (D); retry, roll-forward and abandonment (E) |
+| `tools/_aaos_common.py` `read_events` | Surface `_corrupt/` entries as flagged (B, D) |
+| `tools/emit-event.py`, `tools/fail-task.py`, `tools/project-notion.py` | Honour `StateCommitFailed` / `StateCommitAbandoned` (E) |
+| `schemas/event.schema.json`, `docs/MIGRATIONS.md`, `docs/COWORK-BOOTSTRAP.md` | Enumerated `refs.reason` vocabulary (`InboundInvalid`, `StateCommitFailed`, `StateCommitAbandoned`) and the new `refs.event_id` field; Cowork spool filename and bootstrap type-list sync (C, D, E) |
 | `docs/AAOS-SPEC.md` section 8 | State the canonical ordered view (C); cross-reference this amendment |
 
 ## Verification (additions)
 
-1. A forced interleaving (a rival steals the drain lock between the judge and the swap) leaves exactly one holder and every event present in the union (A, B). This is the invariant test pinned by `tests/test_drain_lock_interleaving.py`; its `@known_defect` marker must be removed by the PR that fixes it.
-2. A pre-existing Cowork fixture corpus folds with zero quarantines in shadow mode; a 10 KB hostile filename cannot abort a drain (D).
-3. A simulated multi-second sharing violation on the state rename ends in `StateCommitFailed` with the staged file retained (E).
+1. A forced interleaving (a rival steals the drain lock between the judge and the swap) leaves exactly one holder (A). The existing `tests/test_drain_lock_interleaving.py` pins this; it asserts holder count and lock content only. The A1b PR adds the event-union assertion (every event present in the NDJSON, `pending/` or flagged `_corrupt/`) and removes the `@known_defect` marker.
+2. A simulated transient `OSError` on a pending file leaves it in `pending/` and it folds on the next drain (B).
+3. A pre-existing Cowork fixture corpus folds with zero quarantines in shadow mode, including events with actor `system`; a legitimate event pending at cutover is not rejected when drained afterwards; a 10 KB hostile filename cannot abort a drain (D).
+4. A simulated multi-second sharing violation on the state rename ends in `StateCommitFailed` with the staged file retained and the event not superseded; abandonment supersedes it (E).
+
+### Ratification record
+Pending. In a small commit made immediately before merge, this block is replaced with `Ratified by Gabriel, <date>, scope: <sections>, PR #19`, and the PROPOSED banner at the top of this file's Status section is replaced in the same commit. Section E's `refs.event_id` field is ratified separately and is not covered by ratifying the rest. Code PRs cite that merge commit.
