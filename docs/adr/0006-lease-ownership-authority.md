@@ -267,48 +267,50 @@ This ADR is satisfied when, in addition to the suite being green:
 4. `assert_lease_held` rejects a holder whose `task.lease` says they hold the lease while
    the lock file says otherwise. This test fails against today's code.
 
+## Amendment — 2026-10-17 (AMD-0006: a shared ownership-transfer primitive for lease and drain locks; extended conforming changes)
 
-## Amendment — 2026-10-17 (AMD-0006: the D2 primitive also governs the drain lock; extended conforming changes)
+**Status of this amendment: PROPOSED. RED, docs-only. Not ratified until the ratification record at the end of this section is filled in.** **D2 is amended** (its mechanism, deliberately left open, is now specified) and its scope is widened to the drain lock. **D1, D3, D4 and every ratified constant** (TTL 45 minutes, skew 5 minutes, settle 30 seconds, `LEASE_TTL_CAP` 45, `LEASE_EXPIRY_CEILING` 90) are **unchanged**. It changes no code. Sources: audit findings M01, M02, M04, M11, M33 and the hardened improvement plan (PR #13). Companion amendments: AMD-0003 and AMD-0004. Revised after an independent adversarial review: the first draft called its primitive a compare-and-swap and claimed its filenames were ignored by every enumeration; both claims were refuted and are corrected here.
 
-**Status of this amendment: PROPOSED. RED, docs-only. Not in force until Gabriel ratifies it and this PR merges.** D1 through D4 and every ratified constant (TTL 45 minutes, skew 5 minutes, settle 30 seconds, `LEASE_TTL_CAP` 45, `LEASE_EXPIRY_CEILING` 90) are **unchanged**. This amendment widens D2's scope, makes its mechanism precise, and extends the conforming-changes table below. It changes no code. Sources: audit findings M01, M02, M04, M11, M33 and the hardened improvement plan (PR #13). Companion amendments: AMD-0003 and AMD-0004.
+### A. D2's mechanism, and what it does and does not guarantee
 
-### A. D2 now defines one primitive, used by every ownership transfer
+D2 left "the concrete mechanism ... to implementation, demonstrated against the property". The drain lock (ADR-0004) has the same path-based takeover defect (audit M01), and the obvious candidate helper, `archive_lock_if_unchanged`, is **not** a compare-and-swap (its docstring says so: it re-reads and then renames by path). The mechanism is therefore fixed as follows; it is a **token-serialized swap**, and this section does not call it a CAS.
 
-D2 left "the concrete mechanism ... to implementation". Two later facts make it worth fixing precisely: the drain lock (ADR-0004) has the same path-based takeover defect (audit M01), and the helper that looks like a candidate, `archive_lock_if_unchanged`, is **not** a compare-and-swap (its own docstring says so: it re-reads then renames by path, leaving a window). The primitive is therefore specified once:
+1. **Every mutator of an existing lock file takes the reclaim token first.** The token is `<lock>.tmp-reclaim`, created with `O_EXCL`, recording holder, pid, a nonce and an expiry. Mutators: the acquirer's reclaim swap, the sweep's reclaim archive, `archive_lock_after_commit` (used by complete-task, fail-task and post-handoff), the lease-task rollback, the CONTESTED archive, the collision archive in the acquire precheck, and the content-verified release. The initial *creation* of a lock that does not exist stays token-free (`os.link` exclusive create is already atomic).
+2. **Acquirer reclaim is a swap and never vacates the canonical path.** Holding the token, re-read the lock's bytes and compare them with the bytes judged expired (mismatch: release the token and lose); stage the new lock as `<lock>.tmp-swap-<pid>`; verify once more that the token file still carries this caller's nonce; `os.replace` the staged file onto the lock path; release the token.
+3. **Maintenance archive (the sweep) does vacate the path.** There is no new holder to put in its place, so under the token, and only if the content equals what was judged, it moves the stale lock to `locks/_archive/`. "Never vacated" in D2 applies to a reclaim *by an acquirer*.
+4. **Release is content-verified:** under the token, remove the lock only if its content is still the releaser's own.
+5. **A stale token** is removed by `rename` to a unique name (exactly one renamer wins) and the moved file's content is checked against what was judged; if a fresh token was moved by mistake it is restored without clobbering.
 
-1. `O_EXCL`-create a **reclaim token** beside the lock, recording holder, pid and an expiry. A stale token is itself reclaimed only by the same `O_EXCL` rule, so it cannot wedge.
-2. Re-read the lock's bytes and compare them with the bytes that were judged expired; on any difference release the token and lose.
-3. Stage the replacement as a sidecar and `os.replace` it onto the lock path. The canonical path is **never vacated**.
-4. Release the token.
+**What this does not guarantee (accepted, bounded residual risk).** Between the final nonce check in step 2 and the `os.replace`, a holder that stalls for longer than the token's expiry can be reclaimed against and then overwrite the new live lock. The stale-token reclaim in step 5 has the same shape of window one level down (a reclaimer can move a fresh token it did not mean to). The token expiry is therefore chosen long against any legitimate hold (60 seconds against a millisecond-scale swap), which bounds both windows. They are not closed: it is *detected* by the post-acquire settle-and-rescan for leases (protocol steps 4-5) and by the NDJSON re-hash plus `_drained`/NDJSON reconciliation for the drain lock (AMD-0004 section B), and it is moot for Cowork while AMD-0003 rule R1 holds. D2's two required properties: **(1)** "the lock path is never vacated for a lock we do not intend to reclaim" holds while the token is exclusive; **(2)** "atomic against a concurrent `os.link` create" holds (`os.replace` leaves no hole). The primitive MUST be demonstrated against these properties by forced-interleaving tests that include the stall-past-token-expiry case, per D4.
 
-Release of a lock a holder owns is **content-verified**: it removes the lock only if the lock's content is still its own. `archive_lock_if_unchanged` MUST NOT be used on any ownership-deciding path. The primitive governs lease locks (`acquire_lease`, the sweep) and the drain lock (AMD-0004 section A).
+### B. Filename convention and sweep enumeration
 
-### B. Filename convention for intermediate files
-
-Token and sidecar files end in `.reclaim-token` and `.swap-<pid>`, **never** `.lock` or `.json`, so no existing enumeration (the sweep lists `locks/` by name) mistakes one for a lock. A test runs the pre-change enumeration predicate over these names and asserts they are ignored. This subsumes the part of OI-266 that D2's mechanism touches.
+- The token and the swap sidecar use the **existing `.tmp-` naming convention** (`<lock>.tmp-reclaim`, `<lock>.tmp-swap-<pid>`), because the sweep already skips any name containing `.tmp-` and the conflict scan only matches canonical and conflict-copy shapes. (The first draft proposed `.reclaim-token` and `.swap-<pid>`; the sweep does **not** ignore those, so a stale sidecar would have been loaded as a lock and could requeue a live lease. Reproduced during review.)
+- **ADR-0006's own Consequences row already requires** that sweep enumeration "accounts for any new intermediate filenames rather than filtering by an ad-hoc name fragment". This amendment honours it: the sweep enumerates only names that are a canonical lock or a conflict-copy shape (the predicate the conflict scan uses) and ignores everything else, replacing the `".tmp-" not in name` fragment filter. That change ships **one PR before** any code creates the new names (the YELLOW cutover procedure), together with a test that feeds the sweep the token, sidecar and a stale-sidecar case and asserts none is loaded as a lock.
+- Orphans of these files (a crashed holder) are never touched by the sweep, so a bounded-age rule in the health check lists any token or sidecar older than several token lifetimes; cleanup archives, never deletes.
 
 ### C. Extended conforming-changes table
 
 | Call site | Required change | Audit |
 |---|---|---|
-| `acquire_lease` precheck, where it archives the incumbent lock | Conditional on the lock still being the one judged (the D2 primitive), not an unconditional archive by path | M01/M02 |
-| `tools/expire-leases.py` reclaim | After loading the task, **re-match** `task.lease` to the lock that was judged; skip if they no longer correspond; archive only through the D2 primitive | M02 |
+| `acquire_lease` precheck, where it archives the incumbent lock; and the collision and CONTESTED archives later in the same function | Each is a token-serialized, content-checked operation (A), not an unconditional archive by path | M01, M02 |
+| `archive_lock_after_commit` (complete-task, fail-task, post-handoff), the lease-task rollback, and the `expire-leases` archive after a committed reclaim | Same: take the token and verify content before moving | M02 |
+| `tools/expire-leases.py` reclaim | After loading the task, **re-match** `task.lease` to the lock that was judged; skip if they no longer correspond | M02 |
+| `tools/expire-leases.py` enumeration | Allowlist by canonical or conflict-copy shape (B) | M02 |
 | `lease-task.py` idempotent no-op | A same-holder, same-session lease that is **expired** is not a no-op success; it falls through to normal acquisition | M04 |
 | `acquire_lease` and `reclaim_decision` | A lock whose `expires` is missing, naive or unparseable is treated as corrupt and **escalated**, never silently skipped | M11 |
-| Tests | A characterization test for a far-future TTL lease (the wedge as `lease-task.py` produces it) | M33 |
-| Pinned-defect tests | `@known_defect` tests in `tests/test_drain_lock_interleaving.py` and `tests/test_windows_fs_semantics.py` flip to ordinary regression tests when their fix lands | M01, M02, M31 |
+| `_release_drain_lock` and the drain-lock acquire | Use the same primitive (AMD-0004 section A) | M01 |
+| Tests | A characterization test for a far-future-TTL lease as `lease-task.py` produces it; the `@known_defect` tests in `tests/test_drain_lock_interleaving.py` and `tests/test_windows_fs_semantics.py` (M01 steal and release, M02 sweep, M31, M32) flip to ordinary regression tests in the PRs that fix them | M33, M31, M32 |
 
 ### D. Recorded non-change (M03)
 
-D3 stays as ratified. The ratified 5-minute skew is **not** turned into a floor on foreign-lease judging (ballot Q4, option A): the CLI rejects only invalid and absurd values (see AMD-0003 section B). If Gabriel later wants a floor, it is a separate, explicit D3 amendment.
+D3 stays as ratified. The 5-minute skew is **not** turned into a floor on foreign-lease judging (ballot Q4, option A): the CLI rejects only invalid and absurd values (AMD-0003 section B). A floor would be a separate, explicit D3 amendment.
 
 ## Consequences of this amendment
 
-- `tools/_aaos_common.py`: one shared ownership-transfer primitive replaces the path-based archive in `acquire_lease`, the sweep and the drain lock; `assert_lease_held` still moves to the lock file under D1.
-- ADR-0006 "Verification" gains: **5.** The drain-lock steal and release pass the same forced three-caller interleaving as the lease reclaim path (the invariant tests above).
-- No new threshold is introduced; no ratified number changes.
+- `tools/_aaos_common.py`: one shared ownership-transfer primitive replaces the path-based archives in `acquire_lease`, the sweep and the drain lock; `assert_lease_held` still moves to the lock file under D1.
+- ADR-0006 "Verification" gains: **5.** the drain-lock steal and release pass the same forced three-caller interleaving as the lease reclaim path; **6.** a forced stall-past-token-expiry interleaving is run and its outcome (the documented residual window) is recorded, not asserted away.
+- No new threshold is introduced and no ratified number changes. The 60-second token expiry is an implementation parameter of the primitive, recorded here so reviewers can challenge it.
 
-## Verification (additions)
-
-1. The `@known_defect` tests for M01 (steal and release) and M02 (sweep re-match) become plain passing tests in the PRs that implement A and C; an unflipped marker fails the suite by design.
-2. Mutation coverage (D4) is extended to the drain lock: reverting the primitive at the drain-lock call site fails at least one test.
+### Ratification record
+Pending. In a small commit made immediately before merge, this block is replaced with `Ratified by Gabriel, <date>, scope: <sections>, PR #20`, and the PROPOSED banner at the top of this file's Status section is replaced in the same commit. Code PRs cite that merge commit.
