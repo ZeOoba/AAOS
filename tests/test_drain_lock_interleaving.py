@@ -6,7 +6,8 @@ nor archives conditionally, so it can revert a live lease).
 
 Each defect gets TWO kinds of test, per plan section 11.2:
 
-  * an INVARIANT test, @unittest.expectedFailure on HEAD. It asserts what the code must guarantee, and
+  * an INVARIANT test, @known_defect on HEAD (tests/_known_defect.py: only a failed `invariant()` counts
+    as 'defect present'; a failed precondition, an AttributeError or a changed signature is a real error). It asserts what the code must guarantee, and
     reaches the race through a deterministic hook at the judge-to-act boundary (a wrapper around the
     judging function, never a thread race, never polling). The fix PR (A1b for M01, A6c for M02) must
     flip it to a plain pass and remove the marker. An unexpected success fails the run.
@@ -23,14 +24,19 @@ from __future__ import annotations
 import json
 import os
 import shutil
+import sys
 import tempfile
 import unittest
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from unittest import mock
 
+# `python -m unittest tests.test_drain_lock_interleaving` must work from the repo root.
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+
 import _tool_loader  # noqa: F401  (puts tools/ on sys.path)
 import _aaos_common as aaos
+from _known_defect import invariant, known_defect
 from test_queue_scripts import NOW, PROJECT, ScriptTestBase, _expired_lease, _iso, _live_lease
 
 _REAL_REPLACE = os.replace
@@ -52,6 +58,9 @@ class DrainLockStealInterleavingTests(unittest.TestCase):
         p = mock.patch.object(aaos, "DEFAULT_SEAM_ROOT", str(self.sentinel))
         p.start()
         self.addCleanup(p.stop)
+        e = mock.patch.dict(os.environ, {"AAOS_SEAM_ROOT": str(self.sentinel)})  # seam_root() reads this first
+        e.start()
+        self.addCleanup(e.stop)
         self.addCleanup(lambda: self.assertFalse(self.sentinel.exists(), "live default seam was resolved"))
 
         self.lock = aaos._drain_lock_path(PROJECT, root=self.root)
@@ -71,7 +80,7 @@ class DrainLockStealInterleavingTests(unittest.TestCase):
         return json.loads(self.lock.read_text(encoding="utf-8")).get("holder_pid") if self.lock.exists() else None
 
     # ---- M01 invariant ------------------------------------------------------------------------
-    @unittest.expectedFailure
+    @known_defect("M01: two stealers can both hold the drain lock")
     def test_two_stealers_never_both_hold_the_drain_lock(self):
         """KNOWN DEFECT M01. B judges X stale; rival D then steals X and publishes live lock Y; B must
         notice and LOSE (return None, leave Y at the canonical path). Today B's path-based os.replace
@@ -90,8 +99,8 @@ class DrainLockStealInterleavingTests(unittest.TestCase):
         with mock.patch.object(aaos, "_read_drain_lock_acquired", judge_then_rival_acts):
             got = aaos._try_acquire_drain_lock(PROJECT, root=self.root, now=NOW)
         self.assertEqual(fired, [1], "hook never fired: test no longer reaches the judge-to-act boundary")
-        self.assertIsNone(got, "B acquired the drain lock while D's live lock Y existed (two holders)")
-        self.assertEqual(self._rival_lock_pid(), self.RIVAL_PID, "D's live lock Y was removed from the canonical path")
+        invariant(got is None, "B acquired the drain lock while D's live lock Y existed (two holders)")
+        invariant(self._rival_lock_pid() == self.RIVAL_PID, "D's live lock Y was removed from the canonical path")
 
     # ---- M01 characterization of the current os.replace window (A1b must rewrite or delete) -----
     def test_current_window_bs_path_based_replace_archives_the_rivals_live_lock(self):
@@ -114,7 +123,7 @@ class DrainLockStealInterleavingTests(unittest.TestCase):
         self.assertIn(self.RIVAL_PID, archived, "D's LIVE lock Y ended up in the archive (the M01 window)")
 
     # ---- M01 release: unconditional unlink ----------------------------------------------------
-    @unittest.expectedFailure
+    @known_defect("M01: release unlinks by path and deletes a successor's lock")
     def test_release_never_deletes_a_successors_lock(self):
         """KNOWN DEFECT M01 (release half). B holds the drain lock but stalls past the stale
         threshold; D steals and publishes Y; B's finally-release unlinks by PATH and deletes Y.
@@ -125,8 +134,8 @@ class DrainLockStealInterleavingTests(unittest.TestCase):
         self.assertEqual(got, self.lock)
         self._rival_steals_over_held_lock()
         aaos._release_drain_lock(got)
-        self.assertTrue(self.lock.exists(), "B's release deleted the successor's live lock")
-        self.assertEqual(self._rival_lock_pid(), self.RIVAL_PID)
+        invariant(self.lock.exists(), "B's release deleted the successor's live lock")
+        invariant(self._rival_lock_pid() == self.RIVAL_PID, "the successor's lock content changed")
 
     def _rival_steals_over_held_lock(self):
         _REAL_REPLACE(str(self.lock), str(self.archive / "rival-archived-B"))
@@ -137,7 +146,7 @@ class SweepReclaimInterleavingTests(ScriptTestBase):
     """M02. expire-leases judges reclaimability from the LOCK it read, then loads the task and checks
     only that the task is still leased/in-progress. It never re-matches task.lease to the judged lock."""
 
-    @unittest.expectedFailure
+    @known_defect("M02: sweep requeues a lease renewed after it was judged expired")
     def test_sweep_does_not_revert_a_lease_renewed_after_it_was_judged_expired(self):
         """KNOWN DEFECT M02. Between the sweep's read of the expired lock and its load_task, a new
         holder legitimately acquires the task (fresh lock + fresh task.lease). The sweep must notice
@@ -165,10 +174,10 @@ class SweepReclaimInterleavingTests(ScriptTestBase):
         self.assertEqual(fired, [1], "hook never fired: sweep no longer loads the task after judging the lock")
         self.assertEqual(code, 0, out)
         task = self.reload_task(task_id)
-        self.assertEqual(task["state"], "leased", "sweep requeued a live lease it never judged")
-        self.assertEqual(task["lease"]["session"], "new-sess")
-        self.assertTrue(lock_file.exists(), "sweep archived the new holder's live lock")
-        self.assertEqual(self.count_events("LeaseExpired"), 0)
+        invariant(task["state"] == "leased", "sweep requeued a live lease it never judged")
+        invariant(task.get("lease", {}).get("session") == "new-sess", "the new holder's lease was dropped")
+        invariant(lock_file.exists(), "sweep archived the new holder's live lock")
+        invariant(self.count_events("LeaseExpired") == 0, "a LeaseExpired event was emitted for a live lease")
 
 
 if __name__ == "__main__":

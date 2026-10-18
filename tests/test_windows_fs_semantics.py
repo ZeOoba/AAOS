@@ -5,8 +5,9 @@ untested) and M31 (partial: assert_lease_held decides from task.lease alone, nev
 file, which ADR-0006 D1 forbids).
 
 Conventions, per plan section 11 (the repo runs `python -m unittest`, no pytest):
-  * @unittest.expectedFailure documents a KNOWN DEFECT. An unexpected success fails the run, so the
-    marker cannot silently outlive its fix: whoever fixes the defect must remove the marker.
+  * @known_defect (tests/_known_defect.py) documents a KNOWN DEFECT. If every pinned invariant holds
+    the run FAILS, so the marker cannot silently outlive its fix; and unlike unittest.expectedFailure
+    it does not swallow unrelated errors (a broken hook, a rename, a changed signature).
   * Plain tests are characterizations of CURRENT behaviour that must keep passing.
   * Everything runs in a temp tree. A guard patches DEFAULT_SEAM_ROOT to a sentinel inside the temp
     tree and fails the test if anything resolved (created) it; no test touches the live seam.
@@ -25,8 +26,12 @@ import unittest
 from pathlib import Path
 from unittest import mock
 
+# `python -m unittest tests.test_windows_fs_semantics` must work from the repo root.
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+
 import _tool_loader  # noqa: F401  (puts tools/ on sys.path)
 import _aaos_common as aaos
+from _known_defect import invariant, known_defect
 
 PROJECT = "ora-ops"
 
@@ -41,6 +46,10 @@ class _SeamGuardedCase(unittest.TestCase):
         patcher = mock.patch.object(aaos, "DEFAULT_SEAM_ROOT", str(self.sentinel))
         patcher.start()
         self.addCleanup(patcher.stop)
+        # seam_root() consults $AAOS_SEAM_ROOT before the default, so guard that route too.
+        env_patcher = mock.patch.dict(os.environ, {"AAOS_SEAM_ROOT": str(self.sentinel)})
+        env_patcher.start()
+        self.addCleanup(env_patcher.stop)
         self.addCleanup(self._assert_live_default_not_resolved)
 
     def _assert_live_default_not_resolved(self):
@@ -84,7 +93,7 @@ class ExclusiveLinkFallbackTests(_SeamGuardedCase):
                 aaos._exclusive_link(src, dest, data)
         self.assertEqual(dest.read_bytes(), b"incumbent")
 
-    @unittest.expectedFailure
+    @known_defect("M32: the os.link fallback exposes an empty canonical file")
     def test_fallback_never_exposes_an_empty_canonical_file(self):
         """KNOWN DEFECT (M32 / OI-264): the fallback is O_EXCL create then a SEPARATE write, so the
         canonical name is visible with zero bytes in between. A deterministic hook (no polling reader
@@ -106,7 +115,7 @@ class ExclusiveLinkFallbackTests(_SeamGuardedCase):
         with mock.patch.object(aaos.os, "link", _eperm), mock.patch.object(aaos.os, "write", sampling_write):
             aaos._exclusive_link(src, dest, data)
         self.assertTrue(observed, "hook never fired: the test no longer reaches the create/write gap")
-        self.assertNotIn(0, observed, "canonical file was observable empty between create and write")
+        invariant(0 not in observed, "canonical file was observable empty between create and write")
 
 
 class ExclusivePublishGapTests(_SeamGuardedCase):
@@ -145,11 +154,14 @@ class DrainLockReleaseRetryTests(_SeamGuardedCase):
 class AssertLeaseHeldCharacterization(_SeamGuardedCase):
     """M31 (partial). ADR-0006 D1 says lease ownership is decided from the LOCK file. Today
     assert_lease_held reads task.lease only and never opens a lock file (it cannot: it has no
-    project id or root). This test pins the CURRENT behaviour so A6b has a concrete assertion to flip.
-    The remainder of M31 (full ADR-0006 verification suite, forced three-caller interleave) is
-    carried by A6b's definition of done."""
+    project id or root), so it returns normally while a lock names another holder. That is the
+    defect, pinned as a @known_defect rather than as a passing test, so a green run does not read as
+    endorsing it. A6b changes the signature: this test then raises TypeError (a real failure), which
+    is the prompt to update the call and drop the decorator. The remainder of M31 (full ADR-0006
+    verification suite, forced three-caller interleave) is carried by A6b's definition of done."""
 
-    def test_task_lease_alone_decides_even_when_lock_file_names_another_holder(self):
+    @known_defect("M31: assert_lease_held ignores the lock file (ADR-0006 D1)")
+    def test_lock_file_naming_another_holder_must_fail_the_assertion(self):
         from datetime import datetime, timedelta, timezone
         now = datetime(2026, 7, 9, 12, 0, 0, tzinfo=timezone(timedelta(hours=-4)))
         task = {
@@ -163,8 +175,21 @@ class AssertLeaseHeldCharacterization(_SeamGuardedCase):
             "task_ref": "t-lock-disagrees", "holder": "cowork", "session": "sess-B",
             "acquired": now.isoformat(), "expires": (now + timedelta(minutes=45)).isoformat(),
         }), encoding="utf-8")
-        # Current behaviour: passes (no exception). ADR-0006 D1 would make this raise LeaseLostError.
-        self.assertIsNone(aaos.assert_lease_held(task, "claude-code", "sess-A", now=now))
+        # Precondition: a fixed implementation that resolves the lock through the default seam (the
+        # only route the current signature allows) MUST find the lock planted above. Point the default
+        # resolution at this temp tree and prove it lands on the planted file; otherwise a correct fix
+        # would read a different tree, see no lock, and the invariant below would hold or fail for the
+        # wrong reason.
+        with mock.patch.dict(os.environ, {"AAOS_SEAM_ROOT": str(self.tmp)}):
+            planted = aaos.lock_path("t-lock-disagrees", PROJECT)
+            self.assertEqual(planted, lock_dir / "t-lock-disagrees.lock")
+            self.assertTrue(planted.exists(), "the planted lock is not where default resolution looks")
+            raised = False
+            try:
+                aaos.assert_lease_held(task, "claude-code", "sess-A", now=now)
+            except aaos.LeaseLostError:
+                raised = True
+        invariant(raised, "assert_lease_held returned normally although the lock file names another holder")
 
 
 if __name__ == "__main__":

@@ -270,7 +270,11 @@ def main(argv=None) -> int:
             return 2
         payload_path = project_dir / "notion-projection.json"
 
-    now_iso = args.now if args.now else aaos._now(None).isoformat()
+    try:
+        now_iso = aaos.parse_cli_now(args.now).isoformat()
+    except aaos.UsageError as exc:
+        print(f"USAGE ERROR: {exc}", file=sys.stderr)
+        return 2
 
     token = os.environ.get("NOTION_TOKEN", "").strip() or None
 
