@@ -2,6 +2,8 @@
 
 ## Status
 
+**Amended 2026-10-17 by AMD-0006 (PROPOSED, pending ratification; merging without the ratification record at the end of the Amendment section ratifies nothing).** See the Amendment section at the end of this file.
+
 **Accepted** — D3's thresholds ratified by Gabriel in-turn, 2026-09-10. Implementation may
 proceed against this ADR.
 
@@ -264,3 +266,47 @@ This ADR is satisfied when, in addition to the suite being green:
    suite. Demonstrated by mutation, per D4.
 4. `assert_lease_held` rejects a holder whose `task.lease` says they hold the lease while
    the lock file says otherwise. This test fails against today's code.
+
+## Amendment — 2026-10-17 (AMD-0006: ownership-transfer requirements for lease and drain locks)
+
+**PROPOSED. RED, docs-only. Not in force until the ratification record at the end of this section is filled in; merging without it ratifies nothing.** It changes no code. **D2 is amended** (see section A, which states plainly what changes); **D1, D3, D4 and every ratified constant** (TTL 45 minutes, skew 5 minutes, settle 30 seconds, `LEASE_TTL_CAP` 45, `LEASE_EXPIRY_CEILING` 90) are **unchanged**. This amendment states **requirements and prohibitions**. The concrete mechanism is deliberately left to the A1a implementation PR and its design note, to be demonstrated against these requirements by forced-interleaving tests, because two reviews refuted mechanism-level text written here (a token protocol whose creation and release recreated the defects it was meant to close). Sources: audit findings M01, M02, M04, M11, M32, M33 and two independent adversarial reviews. Companions: AMD-0003, AMD-0004. Where the hardened plan (PR #13) disagrees with this text, this text governs; see the plan's "Superseded by the amendments" section.
+
+### A. What D2 becomes
+
+D2 ratified an "if and only if" compare-and-swap and left the mechanism open. A local filesystem offers no native compare-and-swap on a path, and `archive_lock_if_unchanged` is not one (its docstring says so). D2 is therefore **amended**: the "if and only if" becomes a requirement to *approximate* it, with every residual window **bounded, documented and detected**, plus the commit-time backstop of D1. This relaxes D2's literal guarantee, and Verification #1 ("at most one `ACQUIRED` across a forced three-caller interleaving") stays required: the implementation must meet it for every interleaving it claims to close and must *report* the stall windows it cannot close, rather than assert them away. D2's two properties stay as the target: the lock path is not vacated for a lock we do not intend to reclaim; the swap is atomic against a concurrent `os.link` create.
+
+### B. Requirements for every ownership-deciding operation on a lock file
+
+These apply to lease locks and to the drain lock (AMD-0004), and to every mutator of an existing lock file. The known sites, to be re-derived by a grep in the implementing PR and kept in a test, are: the acquirer's reclaim and the collision archive in `acquire_lease`; the CONTESTED archive; the `acquire_lease` rollback on an exception; `archive_lock_after_commit` (complete-task, fail-task, post-handoff); the `lease-task` rollback; the `expire-leases` reclaim archive and its orphan-lock archive; `_restore_archived_lock`; and the release of the drain lock.
+
+1. **No unconditional action by path.** An archive, replace, rename or unlink of a lock file on an ownership path MUST be preceded by a verification that the file's content is the content that was judged, and MUST be serialized against other mutators of that lock. `archive_lock_if_unchanged` MUST NOT be used as if it were a compare-and-swap.
+2. **Helper files are published complete and released by content.** Any lock-side helper file (a reclaim token, a swap sidecar) MUST be published complete, never created and then written (the zero-byte window already caused a steal under drain-lock contention), and any release of a helper MUST verify, by content, that it is still the releaser's own. A stalled holder that aborts MUST NOT remove its successor's helper.
+3. **Residual windows are documented, bounded and detected.** For each verify-then-act window the implementation cannot close, the design note states the window, its bound, and how it is detected. "Detected by the settle-and-rescan" is **not sufficient** for an overwrite that lands after the victim's settle ends (the settle may be 0), and the sweep's and release paths have the same verify-then-act shape as the acquirer's swap. The commit-time `assert_lease_held` (D1) is the backstop that must catch a lost lease before a state commit.
+4. **Conflict copies of helper files are signals.** A conflict-shaped copy of a helper file indicates two parties held it; it MUST be detected (consistent with ADR-0003's rule that any conflict copy is CONTESTED), not silently ignored.
+5. **Intermediate file names.** Helper files MUST use the existing `.tmp-` naming convention (for example `<lock>.tmp-<purpose>`), because the sweep today skips any name containing `.tmp-`. Names that do not (`<lock>.reclaim-token`, `<lock>.swap-<pid>`, as in a first draft) are loaded as locks by the current sweep and can requeue a live lease (reproduced). ADR-0006's own Consequences row also requires that sweep enumeration "accounts for any new intermediate filenames rather than filtering by an ad-hoc name fragment": the sweep moves to an **allowlist** (a canonical lock name or a conflict-copy shape, using a task-independent pattern) one PR *before* any code creates new helper names, with a test that feeds it helper and stale-helper names. Orphaned helper files are listed by the health check after a bounded age and archived, never deleted.
+6. **`os.link` exclusive create is atomic where hardlinks are supported.** Where the filesystem refuses hardlinks, `_exclusive_link` falls back to a non-atomic create (audit M32, pinned by a `@known_defect` test); the design note decides whether that fallback is acceptable and records it.
+
+### C. Extended conforming-changes table
+
+| Call site | Required change | Audit |
+|---|---|---|
+| Every mutator listed in section B | Satisfy B.1-B.4 | M01, M02 |
+| `tools/expire-leases.py` reclaim | After loading the task, **re-match** `task.lease` to the judged lock; skip if they no longer correspond | M02 |
+| `tools/expire-leases.py` enumeration | Allowlist (B.5) | M02 |
+| `lease-task.py` idempotent no-op | A same-holder, same-session lease that is **expired** is not a no-op success; it falls through to normal acquisition | M04 |
+| `acquire_lease` and `reclaim_decision` | A lock whose `expires` is missing, naive or unparseable is treated as corrupt and **escalated**, never silently skipped | M11 |
+| `_release_drain_lock` and the drain-lock acquire | Satisfy B (AMD-0004 section A) | M01 |
+| Tests | A characterization test for a far-future-TTL lease as `lease-task.py` produces it; the `@known_defect` tests (M01 steal and release, M02 sweep, M31, M32) become ordinary regression tests in the PRs that fix them | M33, M31, M32 |
+
+### D. Recorded non-change (M03)
+
+D3 stays as ratified. The 5-minute skew is **not** turned into a floor on foreign-lease judging (ballot Q4, option A); the CLI rejects only invalid and absurd values (AMD-0003 section B). A floor would be a separate, explicit D3 amendment.
+
+## Consequences of this amendment
+
+- `tools/_aaos_common.py`: the A1a PR implements B with a design note and forced-interleaving tests (including the stall windows it cannot close); the A1b and A6 PRs adopt it at the drain lock and the lease paths. `assert_lease_held` still moves to the lock file under D1.
+- ADR-0006 "Verification" gains: **5.** the drain-lock steal and release pass the same forced three-caller interleaving as the lease reclaim path; **6.** each residual window is exercised by a forced interleaving and its outcome is recorded in the design note.
+- No new threshold is introduced and no ratified number changes.
+
+### Ratification record
+Pending. In a small commit made immediately before merge, this block is replaced with `Ratified by Gabriel, <date>, scope: <sections>, PR #20`, and the PROPOSED banner at the top of this file's Status section is replaced in the same commit. Code PRs cite that merge commit.
