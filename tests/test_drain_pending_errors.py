@@ -275,6 +275,44 @@ class PendingReadReviewFixes(_PendingTestBase):
         self.assertTrue(half.exists())
         self.assertEqual(self._quarantined(), [])
 
+    def test_a_future_dated_unparseable_file_is_deferred(self):
+        # Clock skew across machines: mtime up to the window in the FUTURE is still "fresh" (abs(age)).
+        half = self.spool / "0000-half.json"
+        half.write_text("{not valid", encoding="utf-8")
+        _age(half, -300)
+        self._drain()
+        self.assertTrue(half.exists())
+        self.assertEqual(self._quarantined(), [])
+
+    def test_a_far_future_dated_unparseable_file_is_quarantined_not_deferred_forever(self):
+        # A peer clock hours ahead must not park a bad file in pending/ indefinitely: abs(age) is outside
+        # the window on either side, so it is quarantined like any other old bad file.
+        bad = self.spool / "0000-bad.json"
+        bad.write_text("{not valid", encoding="utf-8")
+        _age(bad, -7200)
+        aaos.spool_event(_event(2), PROJECT, root=self.root)
+        n, _ = self._drain()
+        self.assertEqual(n, 1)
+        self.assertEqual(self._quarantined(), ["0000-bad.json"])
+        self.assertFalse(bad.exists())
+
+    def test_an_unstatable_unparseable_file_is_deferred_never_quarantined_on_a_guess(self):
+        half = self.spool / "0000-half.json"
+        half.write_text("{not valid", encoding="utf-8")
+        _old(half)  # old enough to quarantine if its age were known
+        real_stat = Path.stat
+
+        def stat(self_, *a, **k):
+            # Fail only the grace check's own stat so listing (is_file) still works.
+            if self_.name == "0000-half.json" and sys._getframe(1).f_code.co_name == "_within_quarantine_grace":
+                raise PermissionError(13, "simulated: cannot stat")
+            return real_stat(self_, *a, **k)
+
+        with mock.patch.object(Path, "stat", stat):
+            self._drain()
+        self.assertTrue(half.exists())
+        self.assertEqual(self._quarantined(), [])
+
     def test_an_old_truncated_multibyte_file_is_quarantined_and_does_not_wedge(self):
         full = json.dumps(dict(_event(1), detail="café"), ensure_ascii=False).encode("utf-8")
         half = self.spool / "0000-half.json"
