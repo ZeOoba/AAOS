@@ -122,7 +122,7 @@ Failing tests (`tests/test_replay_staged.py`):
 **A2-d. Handoff write-once is exclusive (M06).** `save_handoff` checks `load_handoff` then `save_json`: two callers can both see "absent". Change: publish through the exclusive path (`_exclusive_publish`; note A0b's open question on hardlink-refusing mounts, so the fallback decision is recorded in the PR) and compare bytes on `FileExistsError`. Tests (`tests/test_handoff_write_once.py`): `test_two_writers_different_content_exactly_one_wins` (deterministic hook between check and write; loser gets `StateConflictError`; file holds the winner), `test_identical_content_second_writer_is_noop` **[control]**, `test_collision_never_yields_zero_byte_file`.
 
 ### 2.3 A2 acceptance criteria
-1. All tests above plus the 322 baseline pass on 3.10, 3.11, 3.13 and ubuntu/windows legs.
+1. All tests above plus the 356-test baseline pass on 3.10, 3.11, 3.13 and ubuntu/windows legs.
 2. Reproduction scripts for §16.1 and §16.3 (included in the PR body) show the defect on HEAD and the fix on the branch.
 3. `grep`/AST test: no tool calls `archive_lock`, `archive_lock_after_commit` or `archive_lock_if_unchanged` on a path reachable after `commit_state_change` **raises `StateCommitError`** (success-path archival is unchanged).
 4. D4 mutation pass over `apply_staged`'s three comparisons (base hash, lock equality, expiry) and the narrowed `except`: each mutant fails at least one test.
