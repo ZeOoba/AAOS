@@ -304,7 +304,7 @@ class PendingReadReviewFixes(_PendingTestBase):
 
         def stat(self_, *a, **k):
             # Fail only the grace check's own stat so listing (is_file) still works.
-            if self_.name == "0000-half.json" and sys._getframe(1).f_code.co_name == "_within_quarantine_grace":
+            if self_.name == "0000-half.json" and sys._getframe(1).f_code.co_name == "_pending_age":
                 raise PermissionError(13, "simulated: cannot stat")
             return real_stat(self_, *a, **k)
 
