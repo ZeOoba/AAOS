@@ -68,6 +68,13 @@ class NamedShapes(unittest.TestCase):
             with self.subTest(text=text):
                 self.assertEqual(_verdict(text), want)
 
+    def test_unicode_digits_behave_like_3_13(self):
+        # 3.13 accepts a non-ASCII decimal digit after the 6th fraction digit (truncated) and rejects one in
+        # the first 6 digits or the offset; the normaliser's \d must keep that.
+        self.assertEqual(_verdict("2026-07-10T17:46:23.123456٧Z"), "2026-07-10T17:46:23.123456+00:00")
+        self.assertIsNone(_verdict("2026-07-10T17:46:23.12345٧Z"))
+        self.assertIsNone(_verdict("2026-07-10T17:46:23+٠٠:00"))
+
     def test_already_portable_shapes_are_untouched(self):
         for text in ("2026-07-10T17:46:23.580832Z", "2026-07-10T17:46:23+00:00", "2026-07-10T11:58:06.951866-04:00"):
             with self.subTest(text=text):
@@ -77,7 +84,7 @@ class NamedShapes(unittest.TestCase):
         for bad in ("2026-07-10T17:46:23.5.5Z", "2026-07-10T17:46:23+0",
                     "2026-07-10T17:46:23+000", "2026-07-10T17:46:23+00000", "2026-07-10T17:46:23+00:0",
                     "2026-07-10T17:46:23+ 00:00",
-                    "2026-07-10T17:46:23.5ZZ", "2026-07-10T17:46:23+24:00", "2026-07-10T17:46:23+0060x",
+                    "2026-07-10T17:46:23.5ZZ", "2026-07-10T17:46:23.5z", "2026-07-10T17:46:23,+05:3", "2026-07-10T17:46:23, Z", "2026-07-10T17:46:23+24:00", "2026-07-10T17:46:23+0060x",
                     "2026-07-10T17:46:23", "2026-07-10T17:46:23.5"):
             with self.subTest(bad=bad):
                 self.assertIsNone(_verdict(bad))
