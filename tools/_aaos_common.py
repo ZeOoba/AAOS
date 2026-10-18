@@ -441,14 +441,54 @@ def _now(now: datetime | None = None) -> datetime:
     return now if now is not None else datetime.now().astimezone()
 
 
+_PY310_ISO = re.compile(
+    r"(?P<head>\d{4}-\d{2}-\d{2}[T ]\d{2}:\d{2}:\d{2})"
+    r"(?:[.,](?P<frac>\d*))?"
+    r"(?:(?P<z>Z)|(?P<sign>[+-])(?P<hh>\d{2})(?::(?P<mm>\d{2})(?::(?P<ss>\d{2}))?|(?P<cmm>\d{2})(?P<css>\d{2})?)?)?"
+)
+
+
+def _normalise_iso_for_py310(text: str) -> str:
+    """Rewrite a full `YYYY-MM-DD[T ]HH:MM:SS[.f][offset]` stamp into the shape Python 3.10's
+    datetime.fromisoformat accepts: a trailing Z as +00:00, the fraction padded or truncated to 6 digits
+    with a '.', and the offset as +HH:MM[:SS]. 3.11+ accepts all of these as written (a fraction of any
+    length, truncated to 6 digits; the comma decimal; +HH, +HHMM, +HHMMSS offsets), so `_parse_iso_dt`
+    only calls this below 3.11.
+
+    Anything else is returned unchanged, so nothing 3.11+ rejects is newly accepted: whitespace before
+    the offset (3.13 accepts it only for some fraction lengths), mixed colon offsets, and the basic, week
+    and ordinal formats all stay as they were. Pure function; the tests run it on every Python."""
+    m = _PY310_ISO.fullmatch(text)
+    if m is None:
+        return text
+    out = m["head"]
+    if m["frac"]:
+        out += "." + (m["frac"] + "000000")[:6]
+    if m["z"]:
+        out += "+00:00"
+    elif m["sign"] is not None:
+        mm = m["mm"] or m["cmm"]
+        ss = m["ss"] or m["css"]
+        out += m["sign"] + m["hh"] + ":" + (mm or "00") + (":" + ss if ss else "")
+    return out
+
+
 def _parse_iso_dt(value) -> datetime:
     """Parse an ISO-8601 datetime string. Fail-closed CorruptStateError on
     missing/non-string/unparseable/naive values — never silently assumed
     UTC (design section 0.3)."""
     if not isinstance(value, str) or not value:
         raise CorruptStateError(f"missing or non-string datetime value: {value!r}")
+    # Python 3.10 (the interpreter inside Cowork's sandbox) rejects a trailing 'Z'; 3.11+ accepts it.
+    # Cowork stamps UTC as '...Z', so rewrite it to '+00:00' so the common case parses the same on 3.10.
+    # Only an uppercase 'Z' that directly follows a digit is rewritten, so what 3.11+ rejects (a
+    # lowercase 'z', a doubled 'ZZ', a bare 'Z') stays rejected on 3.10 as well. The remaining 3.10-only
+    # differences (long or short fractions, colon-less offsets) are normalised just below.
+    text = value[:-1] + "+00:00" if value.endswith("Z") and value[-2:-1].isdigit() else value
+    if sys.version_info < (3, 11):
+        text = _normalise_iso_for_py310(text)
     try:
-        dt = datetime.fromisoformat(value)
+        dt = datetime.fromisoformat(text)
     except ValueError as exc:
         raise CorruptStateError(f"unparseable datetime value {value!r}: {exc}") from exc
     if dt.tzinfo is None:
