@@ -499,3 +499,31 @@ Two independent adversarial reviews of AMD-0003, AMD-0004 and AMD-0006 (PRs #18-
 | COWORK-BOOTSTRAP Recipe 2 (implicit in B3a) | **New requirement:** Cowork writes the spool file as `<name>.part` and renames it | AMD-0004 Consequences |
 
 Process note: the amendments also record that the settle-versus-TTL CLI guard shipped (PR #17) before ratification, and that nothing in any amendment is in force until its ratification record is filled in.
+
+
+## 16. Design inputs for A1c and A2 (from the third review of AMD-0004)
+
+AMD-0004 no longer amends inbound-event validation or commit-failure roll-forward, because a third independent review (60 claims, 22 refuted, several reproduced) showed the requirements were not satisfiable as written. These are the findings the A1c and A2 designs must answer, each to be proven by a test before a separate amendment is proposed.
+
+**Commit failure and roll-forward (A2)**
+1. `lease-task` runs `except BaseException: archive_lock_if_unchanged(...)` after `TaskLeased` has committed. Reproduced: the event log holds `TaskCreated, TaskLeased`, the task is `queued`, the lock is gone, and a staged state file is left behind. Replaying that staged state would create a lease with no lock behind it (ADR-0006 D1). **A caller must not undo any lock or state after its event commits;** rollback is allowed only before the commit.
+2. A replay must re-verify the transaction's precondition and that the state file is unchanged since staging; on mismatch the only path is explicit abandonment.
+3. After a commit-failure report a caller must not archive its lock or start a second transaction (`complete-task --archive` commits `Completed`, then `Archived`).
+4. The staged file must not be a `.tmp-<pid>` file (a later writer with the same PID overwrites it; `OPERATIONS.md` calls such files safe to delete), must not match a glob that other tools read (`tasks/*.json`), and a dead process must leave something a detector can find.
+5. Event ids and file names in `detail` must fit its 200-character limit at the maximum task-id length (task ids have no length cap); supersession needs the id in a field, not parsed from free text. Only `refs.reason` (ballot Q5-A) is ratified; `refs.reason` does not exist in the schema today.
+
+**Inbound validation (A1c)**
+6. The registry and schema are per checkout (`REPO_ROOT / agent-registry.json`), so an event emitted from a worktree with a newer registry can be rejected after commit by a drain run from another checkout. Decide where the authoritative registry lives, or shadow-tag (never reject) an actor unknown only to the draining checkout. Specify emit-time behaviour when the registry is unreadable.
+7. Code's own actors are not all validated today: `emit-event.py --actor` is free text; `complete-task`, `fail-task` and `lease-task` use the holder (free text), including in `LeaseDenied`. Tests use unregistered holders (`a`, `h`) that will break under a strict rule.
+8. "Do not reject an event in flight at cutover" needs a definition that is not drain-time or sync-time dependent: a file written before cutover on another device but synced after the inventory is in flight yet not in the inventory. Cover files spooled between census and cutover, a `readmit` loop, and a reused file name bypassing validation. Verification must measure "would-reject" tags, not quarantines (shadow mode never quarantines).
+
+**Process**
+9. Ratification: the "fill the record in just before merge" step did not happen for AMD-0003 and AMD-0006. Use an explicit post-merge ratification commit on Gabriel's instruction.
+10. Do not cite an unmerged PR as the home of a requirement without recording it as a pre-ratification change.
+
+**Added from another writer's review pass on PR #19 (commit de3dd10), moved here because the sections they refine were removed from the ADR**
+11. `actor` must be bound to the writing surface so that `system` and registry names cannot be claimed by any writer (for example a `-cowork-` spool file name only Cowork's recipe produces). OPEN: filename token versus a field in the event, and how Code's own events are told apart from a Cowork file that copies the Code naming scheme.
+12. The cutover inventory must be re-snapshotted when hard mode is enabled (or a first-seen ledger kept throughout shadow mode), keyed on file name plus content hash and stored durably.
+13. Hard-mode rejections should go to a separate `_rejected/` directory so a `readmit` tool cannot mistake a rejected event for a merely malformed one and re-admit it blindly; `OPERATIONS.md` (the `_corrupt/` guidance) must then distinguish the two.
+14. A skew-window timestamp check should run before `read_events` sorts (audit M22), so a wildly mis-stamped event cannot take an arbitrary position; a late arrival with an earlier timestamp is tolerated and counted. OPEN: window width, reference time, and whether an out-of-window event is flagged, sorted last, or both.
+15. `complete-task --archive` makes a second `commit_state_change` (`Archived`); the commit-failure design must cover both transitions.
