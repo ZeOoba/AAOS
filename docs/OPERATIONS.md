@@ -6,14 +6,14 @@ This is a human-facing quick-reference for operating the ORA Agent Coordination 
 
 | You see | Check | Go to |
 |---|---|---|
-| A lease is past its `expires` and nothing has moved | `python tools\expire-leases.py --dry-run` | section 2, then 5.1 |
-| A task file was hand-edited or fails to parse | `python tools\validate.py tasks\<task-id>.json` (`JSON PARSE ERROR` = corrupt) | 5.2 |
+| A lease is past its `expires` and nothing has moved | `python C:\Users\Owner\AAOS\tools\expire-leases.py --dry-run` | section 2, then 5.1 |
+| A task file was hand-edited or fails to parse | `python C:\Users\Owner\AAOS\tools\validate.py "C:\Users\Owner\OneDrive - Oxford Capital Partners\Claude_Workspace\AAOS\projects\ora-ops\tasks\<task-id>.json"` (`JSON PARSE ERROR` = corrupt) | 5.2 |
 | `lease-task.py` exits `DENIED` (3) or `CONTESTED` (4) | Nothing: normal under contention; re-read the task state before retrying | 5.3 |
 | Tools fail with a seam/usage error, or the seam folder is missing | Is `Claude_Workspace\AAOS` reachable? Is OneDrive sync paused? Is `--seam-root` right? | 5.4 |
-| The Notion mirror looks old | Read `generation.stale` in `tools\project-notion.py` output; do not eyeball timestamps | 5.5 |
+| The Notion mirror looks old | Read `generation.stale` in `C:\Users\Owner\AAOS\tools\project-notion.py` output; do not eyeball timestamps | 5.5 |
 | `protocol_version mismatch` from `validate.py` | Regenerate the file with current tooling; for a whole-schema bump see section 4 | 5.6, section 4 |
-| Files accumulate in `events\aaos-events.ndjson.pending\` | `python tools\emit-event.py --drain-only --project ora-ops`; if they keep accumulating, suspect the seam first | 5.7, 5.4 |
-| A stray `<name>.tmp-<pid>` file sits next to a state file | `python tools\validate.py <the real file>`; `VALID` means the temp file is an abandoned write | 5.8 |
+| Files accumulate in `events\aaos-events.ndjson.pending\` | `python C:\Users\Owner\AAOS\tools\emit-event.py --drain-only --project ora-ops`; if they keep accumulating, suspect the seam first | 5.7, 5.4 |
+| A stray `<name>.tmp-<pid>` file sits next to a state file | `python C:\Users\Owner\AAOS\tools\validate.py <full path of the real file>`; `VALID` means the temp file is an abandoned write | 5.8 |
 | `post-handoff.py` exits 1 with a write-scope message | Compare the artifact path with the sender's `write_scope` in `agent-registry.json` | 5.9 |
 | You need to retire an in-flight (leased) task | Same procedure as a finished task | section 3, 5.10 |
 

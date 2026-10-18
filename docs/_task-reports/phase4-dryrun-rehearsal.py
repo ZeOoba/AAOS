@@ -1,23 +1,19 @@
 # HISTORICAL Phase-4 rehearsal (kept as a record). Guarded since audit M52: it writes and removes
 # sentinel files inside the seam it is pointed at, so it REFUSES to run unless given an explicit
 # --seam-root, and refuses the live default root (tools/_aaos_common.DEFAULT_SEAM_ROOT). Point it
-# at a copy of the seam tree, never at the live OneDrive seam.
-import argparse, sys, json, os, hashlib, re, subprocess
+# at a copy of the seam tree, never at the live OneDrive seam. Caveat: step 6 opens the ABSOLUTE
+# artifact_manifest paths stored in the copied handoff; a copy of a real handoff therefore reads
+# (read-only) those files wherever they live, including on the live seam.
+import sys, json, os, hashlib, re, subprocess
 from datetime import datetime
 
 GIT_TREE = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 sys.path.insert(0, os.path.join(GIT_TREE, "tools"))
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from _aaos_common import DEFAULT_SEAM_ROOT  # noqa: E402
-from _demo_guard import refuse_live_seam  # noqa: E402
+from _demo_guard import resolve_seam  # noqa: E402
 
-_ap = argparse.ArgumentParser(description="Phase-4 dry-run rehearsal (historical; needs a seam COPY).")
-_ap.add_argument("--seam-root", required=True, help="root of a COPY of the seam tree (never the live seam)")
-_args = _ap.parse_args()
-
-
-refuse_live_seam(_args.seam_root, DEFAULT_SEAM_ROOT)
-SEAM = _args.seam_root
+SEAM = resolve_seam(sys.argv[1:], DEFAULT_SEAM_ROOT)
 
 log = []
 

@@ -184,7 +184,7 @@ There is no build step, package, or installed CLI entry point — every script i
 ```
 python -m unittest discover -s tests -p "test_*.py"
 ```
-(272 tests, all green on 2026-10-17 on Windows under Python 3.11 and 3.13 — recounted with `python -m unittest discover -s tests -p "test_*.py"`: 272, OK. The same command runs in `.github/workflows/ci.yml`; CI is the live source of truth for the count.)
+(283 tests, all green on 2026-10-17 on Windows under Python 3.11 and 3.13, counted on this branch before the other open PRs merge — recounted with `python -m unittest discover -s tests -p "test_*.py"`: 283, OK. The same command runs in `.github/workflows/ci.yml`; CI is the live source of truth for the count.)
 
 **Validate a state file against its schema:**
 ```

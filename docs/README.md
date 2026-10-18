@@ -11,7 +11,7 @@ reviewed; they are not updated when the code moves, so never cite one as current
 | CODE-ADAPTER.md, COWORK-BOOTSTRAP.md | Per-surface adapter instructions |
 | CAPABILITY-MAP.md | What each surface can and cannot do |
 | NON-GOALS.md, V2-BACKLOG.md | Scope boundaries and deferred work |
-| MIGRATIONS.md | Protocol and CLI behaviour changes, newest first |
+| MIGRATIONS.md | Protocol and tool-CLI behaviour changes, newest first |
 | DIAGRAMS.md | Architecture diagrams |
 | adr/ | Ratified decisions (ADR-0001 to ADR-0006); an ADR wins over any other doc |
 
@@ -22,7 +22,7 @@ reviewed; they are not updated when the code moves, so never cite one as current
 | PHASE1-DESIGN-REVIEW.md, PHASE3-DESIGN.md, PHASE4-DESIGN.md, PHASE5-DESIGN.md | Phase design records |
 | GATE2-REVIEW.md to GATE5-REVIEW.md | Phase gate reviews |
 | DELIVERABLES-MANIFEST.md | v1.0 deliverables checklist (partly annotated as historical) |
-| _task-reports/ | Per-task reports and transcripts; the `.py` there is a guarded historical rehearsal |
+| _task-reports/ | Per-task reports and transcripts; `phase4-dryrun-rehearsal.py` there is a guarded historical rehearsal (it refuses the live seam; `_demo_guard.py` is its guard) |
 
 ## Single sources
 - **Test count:** recorded once, in README.md section 4 (Setup & run). CI is the live source of truth.

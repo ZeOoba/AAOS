@@ -11,12 +11,15 @@ path to the live seam slipped past it; and the old refusal test executed the dem
 """
 from __future__ import annotations
 
+import io
 import os
+import re
 import shutil
 import subprocess
 import sys
 import tempfile
 import unittest
+from contextlib import redirect_stderr
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
@@ -71,12 +74,20 @@ class DemoStaticGuard(unittest.TestCase):
         self.assertIn("--seam-root", self.src)
         self.assertIn("DEFAULT_SEAM_ROOT", self.src)
 
-    def test_guard_runs_before_the_first_seam_access(self):
-        call = self.src.find("refuse_live_seam(")
+    def test_demo_wiring_is_exactly_one_resolve_seam_call_and_nothing_else_sets_SEAM(self):
+        """Behavioural tests of resolve_seam() cannot see how the demo uses it, so pin the wiring: the
+        one assignment is `SEAM = resolve_seam(sys.argv[1:], DEFAULT_SEAM_ROOT)`, it happens once, it
+        precedes every path built under SEAM, and nothing swallows the refusal (mutation checks: a
+        different live root, a later reassignment of SEAM, a try/except around the guard)."""
+        assignments = re.findall(r"^SEAM\s*=.*$", self.src, flags=re.M)
+        self.assertEqual(assignments, ["SEAM = resolve_seam(sys.argv[1:], DEFAULT_SEAM_ROOT)"])
+        self.assertEqual(len(re.findall(r"\bSEAM\s*=(?!=)", self.src)), 1, "SEAM must be assigned exactly once")
         first_use = self.src.find("os.path.join(SEAM")
-        self.assertGreater(call, 0, "demo does not call refuse_live_seam()")
         self.assertGreater(first_use, 0)
-        self.assertLess(call, first_use, "the guard must run before any path under the seam is built")
+        self.assertLess(self.src.find("SEAM = resolve_seam("), first_use)
+        self.assertNotIn("except SystemExit", self.src)
+        self.assertNotIn("except BaseException", self.src)
+        self.assertNotRegex(self.src, r"refuse_live_seam\(")  # only resolve_seam() decides, in one place
 
 
 class RefuseLiveSeam(unittest.TestCase):
@@ -126,6 +137,50 @@ class RefuseLiveSeam(unittest.TestCase):
         # Pure string check: nothing here touches the live seam.
         self.assertIn("DEFAULT_SEAM_ROOT", DEMO.read_text(encoding="utf-8"))
         self.assertTrue(aaos.DEFAULT_SEAM_ROOT)
+
+
+class ResolveSeam(unittest.TestCase):
+    """resolve_seam() in-process with a decoy standing in for the live seam: the demo's whole
+    command-line behaviour, without ever running the demo."""
+
+    def setUp(self):
+        self.tmp = Path(tempfile.mkdtemp(prefix="aaos-resolve-"))
+        self.addCleanup(shutil.rmtree, str(self.tmp), ignore_errors=True)
+        self.live = self.tmp / "live-decoy"
+        self.live.mkdir()
+        self.copy = self.tmp / "copy"
+        self.copy.mkdir()
+
+    def test_missing_seam_root_exits_2_naming_the_flag(self):
+        err = io.StringIO()
+        with redirect_stderr(err), self.assertRaises(SystemExit) as ctx:
+            _demo_guard.resolve_seam([], str(self.live), environ={})
+        self.assertEqual(ctx.exception.code, 2)
+        self.assertIn("--seam-root", err.getvalue())
+
+    def test_live_root_is_refused(self):
+        with self.assertRaises(SystemExit) as ctx:
+            _demo_guard.resolve_seam(["--seam-root", str(self.live)], str(self.live), environ={})
+        self.assertIn("REFUSED", str(ctx.exception.code))
+
+    def test_a_copy_is_returned_unchanged(self):
+        self.assertEqual(_demo_guard.resolve_seam(["--seam-root", str(self.copy)], str(self.live), environ={}),
+                         str(self.copy))
+
+    def test_seam_root_equal_to_the_env_seam_warns_but_is_allowed(self):
+        err = io.StringIO()
+        with redirect_stderr(err):
+            got = _demo_guard.resolve_seam(["--seam-root", str(self.copy)], str(self.live),
+                                           environ={"AAOS_SEAM_ROOT": str(self.copy)})
+        self.assertEqual(got, str(self.copy))
+        self.assertIn("AAOS_SEAM_ROOT", err.getvalue())
+
+    def test_no_warning_when_env_points_elsewhere(self):
+        err = io.StringIO()
+        with redirect_stderr(err):
+            _demo_guard.resolve_seam(["--seam-root", str(self.copy)], str(self.live),
+                                     environ={"AAOS_SEAM_ROOT": str(self.live)})
+        self.assertEqual(err.getvalue(), "")
 
 
 class DemoRefusesWithoutSeamRoot(unittest.TestCase):
