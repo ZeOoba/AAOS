@@ -818,6 +818,9 @@ class CorruptPendingFileTests(BaseAaosTest):
         os.makedirs(spool_dir, exist_ok=True)
         bad = spool_dir / "00000000000000000-1-badbad.json"
         bad.write_text("{not valid json", encoding="utf-8")
+        # Age it past the grace window: a fresh unparseable file may be half-synced and is deferred.
+        old = time.time() - aaos.QUARANTINE_GRACE_SECONDS - 60
+        os.utime(str(bad), (old, old))
 
         aaos.spool_event(
             {
