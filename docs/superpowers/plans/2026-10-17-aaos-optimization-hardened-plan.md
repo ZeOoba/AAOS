@@ -1,4 +1,4 @@
-> Produced by aaos-eval-plan-premortem run wf_c4449398-61e on 2026-10-17 (AAOS-grounded copy of cc-eval-plan-premortem). Extends docs/superpowers/specs/2026-10-17-aaos-optimization-design.md (D1-D6 stay ratified; every change is recorded in the section 1a delta table). Ballot Q1-Q15 ratified 2026-10-17 (all option A); L0 read-only findings in section 13, Cowork probe result pending.
+> Produced by aaos-eval-plan-premortem run wf_c4449398-61e on 2026-10-17 (AAOS-grounded copy of cc-eval-plan-premortem). Extends docs/superpowers/specs/2026-10-17-aaos-optimization-design.md (D1-D6 stay ratified; every change is recorded in the section 1a delta table). Ballot Q1-Q15 ratified 2026-10-17 (all option A); L0 read-only findings in section 13; Cowork probe result received, section 14.
 
 # AAOS Optimization: Hardened Improvement Plan (Phase 4)
 
@@ -168,7 +168,7 @@ Status: hardened and validated. Every critical and high pre-mortem objection is 
 - Merge gate: a bot check is never a verdict. Blast-radius PRs (B2, B3b settings and hooks) need an adversarial subagent pass.
 
 ## 8. HUMAN-RATIFICATION-REQUIRED backlog and decision ballot
-**Status 2026-10-17: Q1-Q15 ratified (option A each). Q14's Cowork probe result is still pending; RED items below still need their own in-turn confirmation.** Ratifying Q1-Q9 does not ratify the RED items listed at the end of this section; each still needs its own in-turn confirmation.
+**Status 2026-10-17: Q1-Q15 ratified (option A each). Q14's Cowork probe result is received (section 14), but the bridge's atomicity is still open for the V1 soak; RED items below still need their own in-turn confirmation.** Ratifying Q1-Q9 does not ratify the RED items listed at the end of this section; each still needs its own in-turn confirmation.
 Each item is multiple choice with the recommended option first; Gabriel answers in chat. R0a = Q1-Q9 (needed for Phase 1). R0b = Q10-Q15 (after L0).
 
 **Q1 (sequencing): first implementation PRs**
@@ -250,7 +250,7 @@ Each item is multiple choice with the recommended option first; Gabriel answers 
 - (C) Defer with no detector: silent-loss risk unmeasured.
 
 **Q14: L0 / V1 Cowork leg**
-**RATIFIED 2026-10-17: option (A): one desktop Cowork probe run by Gabriel (docs/superpowers/plans/2026-10-17-l0-cowork-probe.md); fallback Code-only contenders after 2 sessions. Probe RESULT still pending.**
+**RATIFIED 2026-10-17: option (A): one desktop Cowork probe run by Gabriel (docs/superpowers/plans/2026-10-17-l0-cowork-probe.md); fallback Code-only contenders after 2 sessions. Probe result received 2026-10-17, section 14.**
 - (A) Gabriel runs a one-time desktop Cowork probe in a scratch folder (read-only listing of how it reaches the seam); if it is not reproducible within the 2-session timebox, proceed with Code-only contenders **(Recommended)**: bounded, unblocks design.
 - (B) Skip the Cowork leg entirely: faster, but the cross-surface exclusivity assumption is never tested.
 - (C) Block A1 until a full Cowork contention soak passes: maximal evidence, unbounded stall.
@@ -443,3 +443,30 @@ These need either a live read-only Cowork probe (mount type, `stat` inode and li
 - AMD-0003's locality precondition is rewritten: the CAS primitive (A1a) must be correct for **Code on NTFS vs Cowork over a VM mount**, and may not assume NTFS atomicity on the Cowork side. Until V1 says otherwise, treat Cowork as an untrusted-atomicity writer: it must never hold the drain lock or a lease-reclaim token. It writes spool files and handoffs only, which is already the Recipe 1/2 contract.
 - B1's conflict-copy and `_drained` reconciliation detectors matter more: cross-surface sync is the likeliest source of conflict copies.
 - The Q14 recommendation strengthens: option A (one desktop Cowork probe), with Code-only contenders as the fallback.
+
+
+## 14. L0 Cowork probe result (received 2026-10-17, evening)
+
+Run by Gabriel in one interactive desktop Cowork session with `Claude_Workspace\AAOS` mounted; read-only, no AAOS tool run, nothing written.
+
+**Observed**
+- Interactive session. Linux 6.8 container, Ubuntu 22.04.5, **Python 3.10.12**, clock UTC with `TZ` unset (so Cowork stamps `+00:00` / `Z`).
+- The seam appears at `$HOME/mnt/AAOS` (`/sessions/<id>/mnt/AAOS`). **The mount root is the AAOS folder itself: there is no `Claude_Workspace` prefix.**
+- It is a **FUSE** filesystem (`/proc/self/fd/3`, `allow_other`, `default_permissions`), read-write, 931G total / 550G used, with NTFS-style 64-bit inode numbers, 100 ns timestamps, `nlink=1`, and synthetic `rwx------` ownership.
+- No failures, denials or slowness.
+
+**Identity with the host folder: cross-checked, not proven.** Against a read-only host listing taken earlier the same day: `aaos-events.ndjson` is 5,470 bytes on both sides; the events directory mtime `2026-08-16 20:39:51Z` equals the host's `16:39` EDT; `_seam-probe.md` is 2,809 bytes with mtime `2026-07-10 16:17Z` = `12:17` EDT on the host. The inode was not compared with a host-side `stat`.
+
+**Interpretation.** Cowork's file operations reach the host's NTFS folder through a **FUSE bridge**, not through a local disk and not through a OneDrive cloud API. This resolves the question section 13 left open (VM mount vs host): it is a bridge, and `hostLoopMode` means the agent loop runs on the host while commands run in the VM.
+
+**Still not established (the probe is read-only and cannot establish these; they belong to the V1 soak)**
+- Whether the bridge provides atomic exclusive create, hard links (`os.link`; it may be unsupported or emulated), and rename-over-existing, and how quickly a Cowork write becomes visible at the host path.
+- How the OneDrive sync client interacts with files the bridge touches.
+
+**Consequences**
+1. **AMD-0003 section A:** replace the "mount type" half of the pending marker with this result; keep `[PENDING: bridge atomicity, V1 soak]`.
+2. **The R1 lift condition must be reworded.** Condition (1) as drafted ("the probe reports nothing contradicting atomic create, link and replace") cannot be met by a read-only probe. Corrected: (1) the access mechanism is identified (**done**, this section); (2) the V1 soak shows exclusive-create, `os.link` (or a documented absence) and rename-over-existing behave correctly across the bridge with Cowork as a contender. **R1 stays in force; this probe does not lift it.**
+3. **New finding: Cowork's Python is 3.10.12, below the CI floor of 3.11.** `ci.yml` says 3.11 "guards against depending on a recent stdlib addition a Cowork sandbox might not have", but the sandbox has 3.10. A static scan finds no 3.11-only constructs in `tools/`; the version-sensitive piece is `datetime.fromisoformat` in `_parse_iso_dt`, which (from 3.11) also accepts the `Z` suffix that Cowork stamps and that recorded Cowork events carry. **Not yet run on 3.10**, so this is a known-stdlib-behaviour risk, not a measured failure. R1 already keeps Cowork off the seam-writing tools, but Probe X (`validate.py`, read-only) still runs there. Decision needed (see below).
+4. **COWORK-BOOTSTRAP:** state the Cowork seam root as `$HOME/mnt/AAOS` (path-translated from `...\Claude_Workspace\AAOS`), not the Windows path.
+
+**Decision needed on Python 3.10:** (A) add 3.10 to the CI matrix and keep the read-only tools 3.10-compatible; (B) keep 3.11 as the floor and record that Cowork (3.10) only runs the SAFE-BY-HAND recipes and `validate.py` with a documented limitation; (C) first run the suite under 3.10 to measure the real breakage, then choose.
