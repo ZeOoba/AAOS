@@ -2,7 +2,7 @@
 
 ## Status
 
-**Amended 2026-10-17 by AMD-0006 (PROPOSED, pending ratification; merging without the ratification record at the end of the Amendment section ratifies nothing).** See the Amendment section at the end of this file.
+**Amended 2026-10-17 by AMD-0006 (ratified 2026-10-18; see the ratification record at the end of the Amendment section).** See the Amendment section at the end of this file.
 
 **Accepted** — D3's thresholds ratified by Gabriel in-turn, 2026-09-10. Implementation may
 proceed against this ADR.
@@ -271,7 +271,7 @@ This ADR is satisfied when, in addition to the suite being green:
 
 ## Amendment — 2026-10-17 (AMD-0006: ownership-transfer requirements for lease and drain locks)
 
-**PROPOSED. RED, docs-only. Not in force until the ratification record at the end of this section is filled in; merging without it ratifies nothing.** It changes no code. **D2 is amended** (see section A, which states plainly what changes); **D1, D3, D4 and every ratified constant** (TTL 45 minutes, skew 5 minutes, settle 30 seconds, `LEASE_TTL_CAP` 45, `LEASE_EXPIRY_CEILING` 90) are **unchanged**. This amendment states **requirements and prohibitions**. The concrete mechanism is deliberately left to the A1a implementation PR and its design note, to be demonstrated against these requirements by forced-interleaving tests, because two reviews refuted mechanism-level text written here (a token protocol whose creation and release recreated the defects it was meant to close). Sources: audit findings M01, M02, M04, M11, M32, M33 and two independent adversarial reviews. Companions: AMD-0003, AMD-0004. Where the hardened plan (PR #13) disagrees with this text, this text governs; see the plan's "Superseded by the amendments" section.
+**RATIFIED 2026-10-18 (see the ratification record at the end of this section). Docs-only.** It changes no code. **D2 is amended** (see section A, which states plainly what changes); **D1, D3, D4 and every ratified constant** (TTL 45 minutes, skew 5 minutes, settle 30 seconds, `LEASE_TTL_CAP` 45, `LEASE_EXPIRY_CEILING` 90) are **unchanged**. This amendment states **requirements and prohibitions**. The concrete mechanism is deliberately left to the A1a implementation PR and its design note, to be demonstrated against these requirements by forced-interleaving tests, because two reviews refuted mechanism-level text written here (a token protocol whose creation and release recreated the defects it was meant to close). Sources: audit findings M01, M02, M04, M11, M32, M33 and two independent adversarial reviews. Companions: AMD-0003, AMD-0004. Where the hardened plan (PR #13) disagrees with this text, this text governs; see the plan's "Superseded by the amendments" section.
 
 ### A. What D2 becomes
 
@@ -317,4 +317,4 @@ D3 stays as ratified. The 5-minute skew is **not** turned into a floor on foreig
 ### Ratification record
 **Cross-PR ratification order: ratify PR #20 (AMD-0006) first, then PR #19 (AMD-0004), then PR #18 (AMD-0003).** AMD-0004 depends on this amendment for the drain-lock primitive, and AMD-0003 depends on this one and cites AMD-0004 section C for the `.part` rename; any other order leaves a ratified text citing an unratified one.
 
-Pending. Completed by a docs commit on Gabriel's instruction (PR #20 is already merged, and merging it ratified nothing): that commit replaces this paragraph, not the ordering note above it, with `Ratified by Gabriel, <date>, scope: <sections>, PR #20`, and replaces the PROPOSED banner at the top of this file's Status section. Code PRs cite that commit.
+Ratified by Gabriel, 2026-10-18, scope: A, B, C, D, PR #20. Recorded by Claude on Gabriel's explicit in-chat instruction of 2026-10-18; this commit is the ratification act. Code PRs cite this commit.
