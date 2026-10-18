@@ -1,4 +1,4 @@
-> Produced by aaos-eval-plan-premortem run wf_c4449398-61e on 2026-10-17 (AAOS-grounded copy of cc-eval-plan-premortem). Extends docs/superpowers/specs/2026-10-17-aaos-optimization-design.md (D1-D6 stay ratified; every change is recorded in the section 1a delta table). Ballot Q1-Q15 ratified 2026-10-17 (all option A); L0 read-only findings in section 13, Cowork probe result pending.
+> Produced by aaos-eval-plan-premortem run wf_c4449398-61e on 2026-10-17 (AAOS-grounded copy of cc-eval-plan-premortem). Extends docs/superpowers/specs/2026-10-17-aaos-optimization-design.md (D1-D6 stay ratified; every change is recorded in the section 1a delta table). Ballot Q1-Q15 ratified 2026-10-17 (all option A); L0 read-only findings in section 13; Cowork probe result received, section 14.
 
 # AAOS Optimization: Hardened Improvement Plan (Phase 4)
 
@@ -168,7 +168,7 @@ Status: hardened and validated. Every critical and high pre-mortem objection is 
 - Merge gate: a bot check is never a verdict. Blast-radius PRs (B2, B3b settings and hooks) need an adversarial subagent pass.
 
 ## 8. HUMAN-RATIFICATION-REQUIRED backlog and decision ballot
-**Status 2026-10-17: Q1-Q15 ratified (option A each). Q14's Cowork probe result is still pending; RED items below still need their own in-turn confirmation.** Ratifying Q1-Q9 does not ratify the RED items listed at the end of this section; each still needs its own in-turn confirmation.
+**Status 2026-10-17: Q1-Q15 ratified (option A each). Q14's Cowork probe result is received (section 14), but the bridge's atomicity is still open for the V1 soak; RED items below still need their own in-turn confirmation.** Ratifying Q1-Q9 does not ratify the RED items listed at the end of this section; each still needs its own in-turn confirmation.
 Each item is multiple choice with the recommended option first; Gabriel answers in chat. R0a = Q1-Q9 (needed for Phase 1). R0b = Q10-Q15 (after L0).
 
 **Q1 (sequencing): first implementation PRs**
@@ -250,7 +250,7 @@ Each item is multiple choice with the recommended option first; Gabriel answers 
 - (C) Defer with no detector: silent-loss risk unmeasured.
 
 **Q14: L0 / V1 Cowork leg**
-**RATIFIED 2026-10-17: option (A): one desktop Cowork probe run by Gabriel (docs/superpowers/plans/2026-10-17-l0-cowork-probe.md); fallback Code-only contenders after 2 sessions. Probe RESULT still pending.**
+**RATIFIED 2026-10-17: option (A): one desktop Cowork probe run by Gabriel (docs/superpowers/plans/2026-10-17-l0-cowork-probe.md); fallback Code-only contenders after 2 sessions. Probe result received 2026-10-17, section 14.**
 - (A) Gabriel runs a one-time desktop Cowork probe in a scratch folder (read-only listing of how it reaches the seam); if it is not reproducible within the 2-session timebox, proceed with Code-only contenders **(Recommended)**: bounded, unblocks design.
 - (B) Skip the Cowork leg entirely: faster, but the cross-surface exclusivity assumption is never tested.
 - (C) Block A1 until a full Cowork contention soak passes: maximal evidence, unbounded stall.
@@ -443,3 +443,87 @@ These need either a live read-only Cowork probe (mount type, `stat` inode and li
 - AMD-0003's locality precondition is rewritten: the CAS primitive (A1a) must be correct for **Code on NTFS vs Cowork over a VM mount**, and may not assume NTFS atomicity on the Cowork side. Until V1 says otherwise, treat Cowork as an untrusted-atomicity writer: it must never hold the drain lock or a lease-reclaim token. It writes spool files and handoffs only, which is already the Recipe 1/2 contract.
 - B1's conflict-copy and `_drained` reconciliation detectors matter more: cross-surface sync is the likeliest source of conflict copies.
 - The Q14 recommendation strengthens: option A (one desktop Cowork probe), with Code-only contenders as the fallback.
+
+
+## 14. L0 Cowork probe result (received 2026-10-17, evening)
+
+Run by Gabriel in one interactive desktop Cowork session with `Claude_Workspace\AAOS` mounted; read-only, no AAOS tool run, nothing written.
+
+**Observed**
+- Interactive session. Linux 6.8 container, Ubuntu 22.04.5, **Python 3.10.12**, clock UTC with `TZ` unset (so Cowork stamps `+00:00` / `Z`).
+- The seam appears at `$HOME/mnt/AAOS` (`/sessions/<id>/mnt/AAOS`). **The mount root is the AAOS folder itself: there is no `Claude_Workspace` prefix.**
+- It is a **FUSE** filesystem (`/proc/self/fd/3`, `allow_other`, `default_permissions`), read-write, 931G total / 550G used, with NTFS-style 64-bit inode numbers, 100 ns timestamps, `nlink=1`, and synthetic `rwx------` ownership.
+- No failures, denials or slowness.
+
+**Identity with the host folder: cross-checked, not proven.** Against a read-only host listing taken earlier the same day: `aaos-events.ndjson` is 5,470 bytes on both sides; the events directory mtime `2026-08-16 20:39:51Z` equals the host's `16:39` EDT; `_seam-probe.md` is 2,809 bytes with mtime `2026-07-10 16:17Z` = `12:17` EDT on the host. The inode was not compared with a host-side `stat`.
+
+**Interpretation.** Cowork's file operations reach the host's NTFS folder through a **FUSE bridge**, not through a local disk and not through a OneDrive cloud API. This resolves the question section 13 left open (VM mount vs host): it is a bridge, and `hostLoopMode` means the agent loop runs on the host while commands run in the VM.
+
+**Still not established (the probe is read-only and cannot establish these; they belong to the V1 soak)**
+- Whether the bridge provides atomic exclusive create, hard links (`os.link`; it may be unsupported or emulated), and rename-over-existing, and how quickly a Cowork write becomes visible at the host path.
+- How the OneDrive sync client interacts with files the bridge touches.
+
+**Consequences**
+1. **AMD-0003 section A:** replace the "mount type" half of the pending marker with this result; keep `[PENDING: bridge atomicity, V1 soak]`.
+2. **The R1 lift condition must be reworded.** Condition (1) as drafted ("the probe reports nothing contradicting atomic create, link and replace") cannot be met by a read-only probe. Corrected: (1) the access mechanism is identified (**done**, this section); (2) the V1 soak shows exclusive-create, `os.link` (or a documented absence) and rename-over-existing behave correctly across the bridge with Cowork as a contender. **R1 stays in force; this probe does not lift it.**
+3. **New finding: Cowork's Python is 3.10.12, below the CI floor of 3.11.** `ci.yml` says 3.11 "guards against depending on a recent stdlib addition a Cowork sandbox might not have", but the sandbox has 3.10. A static scan finds no 3.11-only constructs in `tools/`; the version-sensitive piece is `datetime.fromisoformat` in `_parse_iso_dt`, which (from 3.11) also accepts the `Z` suffix that Cowork stamps and that recorded Cowork events carry. **Not yet run on 3.10**, so this is a known-stdlib-behaviour risk, not a measured failure. R1 already keeps Cowork off the seam-writing tools, but Probe X (`validate.py`, read-only) still runs there. Decision needed (see below).
+4. **COWORK-BOOTSTRAP:** state the Cowork seam root as `$HOME/mnt/AAOS` (path-translated from `...\Claude_Workspace\AAOS`), not the Windows path.
+
+**Python 3.10 measured (option C, Gabriel's choice).** CPython 3.10.20 against `main` (which includes the A0.5 and review-fix changes):
+- The full suite passes: **322 tests OK**. There is no 3.10 breakage in the tests, and no 3.11-only construct in `tools/`.
+- `datetime.fromisoformat("2026-07-10T17:46:23.580832Z")` raises `ValueError` on 3.10 and parses on 3.11 and 3.13. Consequently `_parse_iso_dt` raises `CorruptStateError` and `parse_cli_now` raises `UsageError` for a `Z`-suffixed value on 3.10.
+- `validate.py` reports an event with a `Z` timestamp `VALID` on all three versions (it does not parse timestamps), so Probe X is unaffected.
+- **`read_events` silently mis-orders `Z`-stamped events on 3.10.** With a `Z` event at 09:00Z and a local-offset event at 11:58-04:00 (15:58Z), 3.11 and 3.13 return them in clock order; 3.10 returns them reversed, because an unparseable timestamp sorts last. No error is raised.
+- Exposure is bounded today: rule R1 keeps Cowork off the seam-writing tools, and the only tool Cowork runs there (`validate.py`) is unaffected. The silent divergence would appear if any timestamp-parsing tool ran on a 3.10 interpreter against Cowork-stamped events.
+
+**Decision (recommended):** make the parser interpreter-independent and guard it. (1) Test-first, `_parse_iso_dt` normalizes a trailing `Z` to `+00:00` before `fromisoformat`, so 3.10, 3.11 and 3.13 agree; (2) add 3.10 to the CI matrix, which costs nothing now that the suite passes on it, so Cowork's actual interpreter is guarded; (3) correct the `ci.yml` comment. Alternative: keep 3.11 as the floor and document that Cowork only runs the SAFE-BY-HAND recipes and `validate.py` (leaves the silent mis-ordering reachable).
+
+
+## 15. Superseded by the amendments (reconciliation after the second review)
+
+Two independent adversarial reviews of AMD-0003, AMD-0004 and AMD-0006 (PRs #18-#20) refuted parts of this plan's design text. **The amendments govern; this plan does not.** Implementers: do not follow the rows below as written. Once the amendments are ratified, each row's replacement is the text in the amendment named in the right-hand column.
+
+| Plan text (section / row) | Status | Replaced by |
+|---|---|---|
+| Section 1 item 2, section 3 "Primitive (A1a)", and the A1a row: an `O_EXCL` reclaim token, `.reclaim-token` / `.swap-<pid>` names, "single ADR-0006-D2-conforming primitive", "CAS" | **Withdrawn.** Those names are loaded as locks by the current sweep and can requeue a live lease; an `O_EXCL` token has a zero-byte window; releasing a helper by path recreates M01. The primitive is not a true compare-and-swap. | AMD-0006 sections A-B: requirements only; mechanism designed in the A1a PR and proven by forced-interleaving tests, including the residual stall windows |
+| Section 3 "Forward-compatible names" | **Corrected:** helper files use the existing `.tmp-` convention, and the sweep moves to an allowlist one PR before any new names exist | AMD-0006 B.5 |
+| Section 1 item 3 and section 3: invariant "no event absent from NDJSON ∪ pending ∪ `_drained`", and any statement that `_drained` is a safe place for an event | **Corrected:** "at least one of" NDJSON, `pending/`, `_drained/`, flagged `_corrupt/`; an event only in `_drained/` or `_corrupt/` is a detected defect; `read_events` must not miss a committed event | AMD-0004 B |
+| Section 4 step 3 (A1c): hard mode "applies only to pending files drained after a recorded cutover timestamp" | **Withdrawn:** drain time is the wrong key; in-flight events must not be rejected | AMD-0004 D.4 (requirements; inventory design in the A1c PR) |
+| Section 4: actor rule "in the agent registry" | **Corrected:** registry **or** `system`; `emit_event` validates the actor before spooling | AMD-0004 D.1-D.2 |
+| Section 5 and the A2 row: `StateCommitFailed` makes the event "superseded"; staged temp "retained" | **Withdrawn:** roll forward; staged state must be durable, discoverable, not a `.tmp-` file, never deleted by hand; supersession only by explicit abandonment | AMD-0004 E |
+| Section 8, Q8 rationale ("adds a new seam writer") | **Corrected:** `emit-event.py --event-log-ref` already exists; what is deferred is an automated caller | AMD-0004 F |
+| Section 11.1-11.3, items with A0/A0.5 | Unchanged | n/a |
+| Section 13 item 1: "Cowork writes through a VM folder mount" listed as **Established**; section 13 "only 6 sessions" | **Corrected:** the probe (section 14) shows a FUSE bridge to the host NTFS folder; only 3 sessions selected the `Claude_Workspace` root, the latest on 2026-07-10 | AMD-0003 A |
+| Section 13 / ballot Q11-Q12 wording on `cowork`-owned tasks ("handoff-only, never leased") | **Reversed (Gabriel, after the second review):** while R1 holds, `claude-code` may lease a `cowork`-owned task, acting on Cowork's return handoff | AMD-0003 C |
+| B1, B5, F0 rows: `refs.event_id` / `count` as event fields | **Withdrawn:** `refs` is closed; ids and counts travel in `detail`; the only schema change is the ratified `refs.reason` enum | AMD-0004 E, D |
+| COWORK-BOOTSTRAP Recipe 2 (implicit in B3a) | **New requirement:** Cowork writes the spool file as `<name>.part` and renames it | AMD-0004 Consequences |
+
+Process note: the amendments also record that the settle-versus-TTL CLI guard shipped (PR #17) before ratification, and that nothing in any amendment is in force until its ratification record is filled in.
+
+
+## 16. Design inputs for A1c and A2 (from the third review of AMD-0004)
+
+AMD-0004 no longer amends inbound-event validation or commit-failure roll-forward, because a third independent review (60 claims, 22 refuted, several reproduced) showed the requirements were not satisfiable as written. These are the findings the A1c and A2 designs must answer, each to be proven by a test before a separate amendment is proposed.
+
+**Commit failure and roll-forward (A2)**
+1. `lease-task` runs `except BaseException: archive_lock_if_unchanged(...)` after `TaskLeased` has committed. Reproduced: the event log holds `TaskCreated, TaskLeased`, the task is `queued`, the lock is gone, and a staged state file is left behind. Replaying that staged state would create a lease with no lock behind it (ADR-0006 D1). **A caller must not undo any lock or state after its event commits;** rollback is allowed only before the commit.
+2. A replay must re-verify the transaction's precondition and that the state file is unchanged since staging; on mismatch the only path is explicit abandonment.
+3. After a commit-failure report a caller must not archive its lock or start a second transaction (`complete-task --archive` commits `Completed`, then `Archived`).
+4. The staged file must not be a `.tmp-<pid>` file (a later writer with the same PID overwrites it; `OPERATIONS.md` calls such files safe to delete), must not match a glob that other tools read (`tasks/*.json`), and a dead process must leave something a detector can find.
+5. Event ids and file names in `detail` must fit its 200-character limit at the maximum task-id length (task ids have no length cap); supersession needs the id in a field, not parsed from free text. Only `refs.reason` (ballot Q5-A) is ratified; `refs.reason` does not exist in the schema today.
+
+**Inbound validation (A1c)**
+6. The registry and schema are per checkout (`REPO_ROOT / agent-registry.json`), so an event emitted from a worktree with a newer registry can be rejected after commit by a drain run from another checkout. Decide where the authoritative registry lives, or shadow-tag (never reject) an actor unknown only to the draining checkout. Specify emit-time behaviour when the registry is unreadable.
+7. Code's own actors are not all validated today: `emit-event.py --actor` is free text; `complete-task`, `fail-task` and `lease-task` use the holder (free text), including in `LeaseDenied`. Tests use unregistered holders (`a`, `h`) that will break under a strict rule.
+8. "Do not reject an event in flight at cutover" needs a definition that is not drain-time or sync-time dependent: a file written before cutover on another device but synced after the inventory is in flight yet not in the inventory. Cover files spooled between census and cutover, a `readmit` loop, and a reused file name bypassing validation. Verification must measure "would-reject" tags, not quarantines (shadow mode never quarantines).
+
+**Process**
+9. Ratification: the "fill the record in just before merge" step did not happen for AMD-0003 and AMD-0006. Use an explicit post-merge ratification commit on Gabriel's instruction.
+10. Do not cite an unmerged PR as the home of a requirement without recording it as a pre-ratification change.
+
+**Added from another writer's review pass on PR #19 (commit de3dd10), moved here because the sections they refine were removed from the ADR**
+11. `actor` must be bound to the writing surface so that `system` and registry names cannot be claimed by any writer (for example a `-cowork-` spool file name only Cowork's recipe produces). OPEN: filename token versus a field in the event, and how Code's own events are told apart from a Cowork file that copies the Code naming scheme.
+12. The cutover inventory must be re-snapshotted when hard mode is enabled (or a first-seen ledger kept throughout shadow mode), keyed on file name plus content hash and stored durably.
+13. Hard-mode rejections should go to a separate `_rejected/` directory so a `readmit` tool cannot mistake a rejected event for a merely malformed one and re-admit it blindly; `OPERATIONS.md` (the `_corrupt/` guidance) must then distinguish the two.
+14. A skew-window timestamp check should run before `read_events` sorts (audit M22), so a wildly mis-stamped event cannot take an arbitrary position; a late arrival with an earlier timestamp is tolerated and counted. OPEN: window width, reference time, and whether an out-of-window event is flagged, sorted last, or both.
+15. `complete-task --archive` makes a second `commit_state_change` (`Archived`); the commit-failure design must cover both transitions.
