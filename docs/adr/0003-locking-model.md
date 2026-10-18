@@ -4,6 +4,8 @@
 
 Accepted
 
+**Amended 2026-10-17 by AMD-0003 (PROPOSED, pending ratification; merging without the ratification record at the end of the Amendment section ratifies nothing).** See the Amendment section at the end of this file.
+
 ## Context
 
 The existing `chip-claims.log` pattern — a timestamped claim with a staleness window and explicit terminal states — is the direct precedent for AAOS leasing, and it is proven in production; a race incident is on record where a chip launched on two surfaces and double-ran before this pattern existed. That pattern, however, lives on local disk and is Claude-Code-internal only. AAOS leases must cross the OneDrive seam between a local process (Code) and a possibly cloud-hosted surface (Cowork). OneDrive resolves simultaneous writes to the same file by producing conflict copies — for example `<name>-<HOSTNAME>.lock` or `<name> (1).lock` — rather than by honoring atomic-exclusive-create semantics across two different writing surfaces. This is the one genuinely new hard problem introduced by choosing the shared-folder architecture in ADR-0001, and it must be met head-on rather than assumed away.
@@ -40,3 +42,56 @@ The existing `chip-claims.log` pattern — a timestamped claim with a staleness 
 ## Consequences
 
 This design extends the existing `chip-claims.log` pattern — timestamp, staleness window, explicit terminal states — with a settle-then-rescan step specifically for the cross-surface OneDrive boundary that the chip system never had to cross. It is explicitly framed as an extension of a proven pattern, not a new locking philosophy invented from scratch. The 30-second settle delay is the honest, acknowledged price of choosing the shared-folder architecture in ADR-0001.
+
+## Amendment — 2026-10-17 (AMD-0003: locality, Cowork write rule, settle bound, routing)
+
+**PROPOSED. RED, docs-only. Not in force until the ratification record at the end of this section is filled in; merging without it ratifies nothing.** It changes no code. Dependent code and doc changes land in separate PRs that cite the merge commit of the *ratified* text. This amendment states **requirements and prohibitions**; mechanisms are settled in the implementing PRs, with tests. Sources: audit findings M01, M02, M38, the L0 evidence, and two independent adversarial reviews of earlier drafts. Companions: AMD-0004 (ADR-0004), AMD-0006 (ADR-0006). Where the hardened plan (PR #13) disagrees with this text, this text governs; see the plan's "Superseded by the amendments" section.
+
+### A. Locality: how Cowork reaches the seam
+
+The Context above calls Cowork a "possibly cloud-hosted surface". Evidence (2026-10-17):
+
+- **Sessions recorded on this machine:** 529 (202 interactive, 327 scheduled), all local, all with `hostLoopMode: true`. (Local metadata cannot record cloud-hosted sessions, so this says nothing about any other machine.)
+- **Seam sessions:** only 3 sessions selected the `Claude_Workspace` root (the most recent 2026-07-10, which also selected the AAOS repo); three others selected a subfolder or a different OneDrive root. The only recorded Code-to-Cowork round-trip is from 2026-07-10 (a seam file; not re-verifiable from this repo). Cross-surface locking has not been exercised since.
+- **Probe result (interactive session):** a Linux container (Ubuntu 22.04.5, **Python 3.10.12**, UTC clock) sees the seam at `$HOME/mnt/AAOS` as a **FUSE** filesystem with NTFS-style inodes and 100 ns timestamps. Sizes and times of two files agreed with a host listing, so the mount reaches the host's NTFS folder through a **FUSE bridge**; the inode was not compared.
+
+**Precondition.** The atomicity of exclusive create, `os.link` and `os.replace` is relied on only among processes running directly on the seam's NTFS volume (Code, including the scheduled Code fleet). For a Cowork session going through the FUSE bridge it is **UNVERIFIED** `[PENDING: V1 soak. The read-only probe identified the mechanism; it cannot show atomicity]`. The compensating control is unchanged: settle-then-rescan, conflict-copy detection, and fail-closed on ambiguity. The "cloud-hosted" description of Cowork in this ADR's Context and in the `agent-registry.json` cowork entry is superseded by this section.
+
+**Rule R1 (decided: option (c), Gabriel, 2026-10-17).** Until the lift condition is met, a Cowork session MUST NOT run **any tool under `tools/` that writes the seam**, whether by default or by flag. A conforming test enumerates `tools/*.py`, classifies each as seam-writing or read-only, and fails when a new tool is unclassified. As of this writing the seam-writing tools include `create-task`, `lease-task`, `complete-task`, `fail-task`, `post-handoff`, `expire-leases`, `emit-event`, `publish-contracts`, `derive-heartbeat` and `project-notion`; the test, not this list, is authoritative. Read-only tools such as `validate.py` remain allowed. Cowork works SAFE-BY-HAND: the three recipes in COWORK-BOOTSTRAP section 7, each of which creates only a new, randomly-suffixed file.
+
+- **R1 is honour-system until wired.** Nothing in the code distinguishes surfaces, and Cowork reads the bootstrap and the seam's contracts mirror, not this ADR. R1 binds in practice only after COWORK-BOOTSTRAP sections 6 and 7 are edited and the mirror is republished. Whether scheduled Cowork tasks embed their own copy of the bootstrap is `UNVERIFIED` and is a checklist item for that edit.
+- **Lift condition (all must hold; lifted only by a further explicit documentation change):** (1) the access mechanism is identified (**met**, 2026-10-17); (2) the V1 soak has passed with Cowork as a contender, against a non-live seam root. If the Cowork contender cannot be reproduced within the soak's two-session timebox, the condition is **not** met and R1 stays in force.
+
+### B. Thresholds are unchanged; the settle must be shorter than the lease
+
+- The ratified constants (45-minute TTL, 5-minute skew, 30-second settle) are **unchanged** and are defaults, not floors. The CLI rejects invalid and absurd values (sanity ceilings are implementation guards, not policy). `LEASE_TTL_CAP` (45) and `LEASE_EXPIRY_CEILING` (90) remain ADR-0006 D3's. **Recorded non-change (M03):** the 5-minute skew is not enforced as a floor on foreign-lease judging (ballot Q4, option A).
+- **Requirement:** the requested settle MUST be strictly shorter than the lease TTL. The lock's `expires` is computed when the lock is staged, before the step-4 settle, so a settle at least as long as the TTL leaves the holder asleep on an already-expired lock. This guard was **shipped before this text is ratified**, as a CLI input validation (PR #17); ratifying this amendment ratifies it retroactively. It is CLI-only: library callers of `acquire_lease` are not guarded, and a past `--now` can still mint an already-reclaimable lock.
+
+### C. Routing is enforced at acquisition (M38)
+
+Before **any lock I/O** at the start of acquisition, the acquirer MUST verify that (i) `holder` is an active agent in `agent-registry.json`, and (ii) if `task.owner_agent` is not `unassigned`, `holder` equals it, **with this exception while R1 holds (ballot, 2026-10-17):** a task whose `owner_agent` is `cowork` is also leasable by `claude-code`, acting on Cowork's return handoff, because no tool can advance a task without a held lease and Cowork is barred from every lease tool. An unreadable or invalid registry denies the acquisition, and the failure MUST be reported as a denial rather than an uncaught error.
+
+- **Denial event.** A routing denial MUST be recorded as an event whose actor is `system` (never the unregistered holder, which AMD-0004 would quarantine), with the reason in `detail`. No schema change is needed.
+- **`to_agent` is deliberately not enforced here.** It is a handoff field; routing of handoffs belongs to inbound-trust validation.
+- Takes effect only when the conforming code merges.
+
+## Consequences of this amendment
+
+| File | Conforming change | When |
+|---|---|---|
+| `docs/COWORK-BOOTSTRAP.md` sections 6 and 7 | Cap Cowork at SAFE-BY-HAND for every seam-writing tool (R1); state the Cowork seam path as `$HOME/mnt/AAOS`; Recipe 2 writes a `.part` file and renames it (AMD-0004) | after ratification |
+| Seam contracts mirror | Republish the edited bootstrap; check scheduled Cowork tasks for embedded copies | after the bootstrap edit |
+| `agent-registry.json` cowork entry | Replace "cloud-hosted agent surface" with the verified description (local container, FUSE bridge to the host folder) | after ratification |
+| A test over `tools/*.py` | Classify each tool as seam-writing or read-only (R1) | with the bootstrap edit |
+| `tools/_aaos_common.py` `acquire_lease`, `tools/validate.py` `load_registry` | Routing check before any lock I/O; wrap registry read errors so the result is a denial, not exit 1 | after ratification |
+| `tools/lease-task.py` | Emit the routing denial as actor `system` (it currently emits denials with `actor=holder`) | with the routing code |
+| `docs/AAOS-SPEC.md` section 7 | Cross-reference this amendment | after ratification |
+
+## Verification (additions)
+
+1. Routing: an unregistered holder is denied before any lock file is touched (the incumbent's lock is byte-unchanged); a registered holder on a task owned by another agent is denied; `claude-code` may lease a `cowork`-owned task while R1 holds; an `unassigned` task is leasable by any registered holder; an unreadable registry yields a denial, not an uncaught error; the denial event's actor is `system`.
+2. Settle bound: `--settle-sec` at or above `--ttl-min x 60` exits 2 (PR #17's tests).
+3. R1: the classification test exists and fails on an unclassified tool; the bootstrap never instructs a seam-writing tool outside the three recipes.
+
+### Ratification record
+Pending. In a small commit made immediately before merge, this block is replaced with `Ratified by Gabriel, <date>, scope: <sections>, PR #18`, and the PROPOSED banner at the top of this file's Status section is replaced in the same commit. Code PRs cite that merge commit.
