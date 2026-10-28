@@ -19,8 +19,9 @@ sequenceDiagram
     participant EX as expire-leases.py (weekly)
 
     A->>CT: --title --accept
-    CT->>T: atomic_write (exit 2/3 on usage/conflict)
-    CT->>S: TaskCreated (commit_state_change)
+    CT->>T: stage tmp (commit_state_change; exit 2/3 on usage/conflict)
+    CT->>S: TaskCreated (spool = commit point)
+    CT->>T: os.replace tmp -> task.json
 
     A->>LT: task_id --holder --session
     LT->>T: load (state=queued?)
@@ -103,10 +104,10 @@ flowchart LR
     LT["lease-task.py"] -->|"1. os.link create"| LOCK
     LT -->|"2. after settle: copy holder/expires"| LEASE
 
-    ACQ1["acquire_lease step 1\n(_aaos_common.py:661-687)"] -->|"READS (wrong source)"| LEASE
-    ASSERT["assert_lease_held\n(:837-851) double-run backstop"] -->|"READS (wrong source)"| LEASE
+    ACQ1["acquire_lease step 1\n(_aaos_common.py acquire_lease)"] -->|"READS (wrong source)"| LEASE
+    ASSERT["assert_lease_held\n(_aaos_common.py) double-run backstop"] -->|"READS (wrong source)"| LEASE
     CT["complete / fail / post-handoff"] --> ASSERT
-    RECL["reclaim_decision\n(:431-464) used by expire-leases"] -->|"reads (correct source)"| LOCK
+    RECL["reclaim_decision\n(_aaos_common.py) used by expire-leases"] -->|"reads (correct source)"| LOCK
 
     ACQ1 -. "disagreement window on EVERY acquisition" .- LOCK
     ASSERT -. "passes for loser during window" .- LOCK
