@@ -1,6 +1,6 @@
 # AAOS diagrams
 
-Companion to the architecture diagram in the README. Each diagram was checked against the code on `origin/main` 12ae2e4 (2026-10-03) on 2026-10-06. Where a defect is still open it is labelled. The lock/projection split is ADR-0006, which is not implemented.
+Companion to the architecture diagram in the README. Each diagram was checked against the code on `origin/main` f8f038a on 2026-10-28 (diagrams 1, 3 and 4 corrected; diagram 4 marks the not-running chain dashed). Where a defect is still open it is labelled. The lock/projection split is ADR-0006, which is not implemented.
 
 ## 1. Task lifecycle: write ordering and every exit
 
@@ -135,4 +135,7 @@ flowchart LR
     PROJ --> PUB["publish-notion.py\nNOTION_TOKEN, 30s timeout,\nno retry/backoff, no idempotency"]
     PUB -->|"POST /v1/pages: NEW page each run"| NOTION["Notion Ops Hub (dated child pages)"]
     PUB -. "failure: exit 1, never a queue failure" .-> NONE["(no alerting on failure)"]
+    classDef planned stroke-dasharray: 4 3,stroke:#888
+    class FETCH,DH,HB,PN,PROJ,PUB,NOTION planned
 ```
+<!-- dashed = not running: no scheduled caller or no producer. diagram-verified: 2026-10-28 against origin/main f8f038a -->

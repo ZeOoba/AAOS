@@ -82,8 +82,11 @@ requirements.txt, .github/workflows/ci.yml"]
     GIT -. "git-tree read (preferred)" .-> COWORK
     SCHEMAS --> DRIFT
     CONTRACTS --> DRIFT
+
+    classDef planned stroke-dasharray: 4 3,stroke:#888
+    class AGENT_FETCH,SIG,HB,DERIVE,PROJ,PROJ_OUT,PUBN,NOTION planned
 ```
-<!-- diagram-verified: 2026-10-06 against origin/main 12ae2e4 -->
+<!-- diagram-verified: 2026-10-28 against origin/main f8f038a (dashed = designed/built but not running: no scheduled caller or no producer) -->
 
 **Reading the diagram:** there is no coordinator process, no message broker, and no agent runtime loop — the flowchart is deliberately flat. "Coordination" is two independent CLI invocations (one per surface, at different times) reading and atomically rewriting the same small set of JSON files under a lease/lock discipline, plus a derived heartbeat/Notion-projection layer that is read-only and never itself a source of truth. The one genuinely live network call anywhere in this repo is `publish-notion.py`'s POST to the Notion API (stdlib `urllib`, no new dependency) — everything upstream of it, including `project-notion.py`'s payload build and `derive-heartbeat.py`'s projection, stays pure local-file computation, and a publish failure there is never treated as a queue failure. Two components have an external trigger, both on ORA's CC/MCP scheduler fleet rather than manual one-offs: `expire-leases.py` runs unattended as `ora-aaos-expire-leases` (weekly, Mondays 07:20 ET) and `publish-contracts.py` as `ora-aaos-publish-contracts`. The heartbeat/Notion-projection chain (`derive-heartbeat.py` → `project-notion.py` → `publish-notion.py`) is built and tested but has no scheduled caller: as of 2026-10-03 the live seam holds no `heartbeat.json`, `signals.json`, or `notion-projection.json`, so that half of the diagram shows the designed flow, not a running one. In the diagram, `signals.json` is the heartbeat chain's input and has no producer (the agent-session fetch step is UNBUILT); the spool file in `events/aaos-events.ndjson.pending/` — not the NDJSON — is each event's durable commit point; and the lock file is the lease-ownership authority while `task.lease` is only a projection of it (ADR-0006, not yet implemented in code). Four further diagrams (task lifecycle sequence, event commit/drain pipeline, lease authority vs projection, derived projection chain) are in [`docs/DIAGRAMS.md`](docs/DIAGRAMS.md).
 
