@@ -9,6 +9,10 @@ parse_cli_now exit 2 and, worse, made read_events sort that event last without a
 
 The oracle is CPython 3.13: tests/fixtures/iso_oracle_py313.json holds its verdict (UTC-offset-aware
 isoformat string, or null = rejected) for the recorded strings, stratified by fraction length and tail shape.
+It was recorded on CPython 3.13.17 by tests/record_iso_oracle.py (the file's _meta says so). 3.13.17 stopped
+accepting a '.' or ',' with no digits before an offset ('23.Z', '23,+0000'); 3.11.17 and 3.13.14 still accept it.
+The normaliser follows 3.13.17 (3.10 rejects it), so those 45 strings live in their own section with both
+answers, and the test asserts the one matching the interpreter it runs on. Everything else is patch-stable.
 Whitespace before the offset ('23 +05:30') is NOT covered: 3.13 accepts it only for some fraction
 lengths, so mirroring it would be guesswork; it stays rejected on 3.10. The same file is asserted on every interpreter CI runs, so the 3.10 leg is checked against 3.13's
 recorded answers. The live differential (3.11+) re-derives the verdict from the interpreter itself
@@ -28,7 +32,22 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 import _tool_loader  # noqa: F401,E402  (puts tools/ on sys.path)
 import _aaos_common as aaos  # noqa: E402
 
-ORACLE = json.loads((Path(__file__).resolve().parent / "fixtures" / "iso_oracle_py313.json").read_text(encoding="utf-8"))
+ORACLE_FILE = json.loads((Path(__file__).resolve().parent / "fixtures" / "iso_oracle_py313.json").read_text(encoding="utf-8"))
+ORACLE = ORACLE_FILE["stable"]                              # asserted on every interpreter
+EMPTY_FRAC = ORACLE_FILE["empty_fraction_before_offset"]    # {"rejecting": v, "accepting": v} per string
+CANARY = ORACLE_FILE["_meta"]["canary"]
+
+
+def _stdlib_rejects_empty_fraction():
+    """True where datetime.fromisoformat itself rejects an empty fraction before an offset (CPython >= 3.13.17).
+    Python < 3.11 always counts as rejecting: that is what the normaliser deliberately gives there."""
+    if sys.version_info < (3, 11):
+        return True
+    try:
+        datetime.fromisoformat(CANARY)
+    except ValueError:
+        return True
+    return False
 
 
 def _verdict(text):
@@ -47,6 +66,17 @@ class AgainstRecordedPy313(unittest.TestCase):
     def test_every_recorded_verdict_matches_on_this_interpreter(self):
         wrong = {s: (_verdict(s), want) for s, want in ORACLE.items() if _verdict(s) != want}
         self.assertEqual(wrong, {}, f"{len(wrong)} of {len(ORACLE)} disagree with CPython 3.13, e.g. {dict(itertools.islice(wrong.items(), 5))}")
+
+    def test_empty_fraction_before_offset_matches_this_interpreters_generation(self):
+        key = "rejecting" if _stdlib_rejects_empty_fraction() else "accepting"
+        wrong = {s: (_verdict(s), v[key]) for s, v in EMPTY_FRAC.items() if _verdict(s) != v[key]}
+        self.assertEqual(wrong, {}, f"{len(wrong)} of {len(EMPTY_FRAC)} disagree with the recorded {key!r} verdicts, e.g. {dict(itertools.islice(wrong.items(), 5))}")
+
+    def test_empty_fraction_section_is_what_it_claims_to_be(self):
+        # Guards the fixture itself: 'rejecting' is all-null, and 'accepting' differs from it for at least the known 19 shapes.
+        self.assertTrue(all(v["rejecting"] is None for v in EMPTY_FRAC.values()))
+        self.assertGreaterEqual(sum(v["accepting"] is not None for v in EMPTY_FRAC.values()), 19)
+        self.assertTrue(set(ORACLE).isdisjoint(EMPTY_FRAC))
 
 
 class NamedShapes(unittest.TestCase):
@@ -69,6 +99,13 @@ class NamedShapes(unittest.TestCase):
         ):
             with self.subTest(text=text):
                 self.assertEqual(_verdict(text), want)
+
+    def test_empty_fraction_before_offset_is_left_alone_on_every_interpreter(self):
+        # Pure function, so this runs on 3.10 too: the separator with no digits is not rewritten into a valid stamp
+        # (rejection itself happens in _parse_iso_dt on 3.10, covered by the recorded section).
+        for text in ("2026-07-10T17:46:23.Z", "2026-07-10T17:46:23,+0000", "2026-07-10T17:46:23.+00", "2026-07-10T17:46:23.-04:00"):
+            with self.subTest(text=text):
+                self.assertEqual(aaos._normalise_iso_for_py310(text), text)
 
     def test_unicode_digits_behave_like_3_13(self):
         # 3.13 accepts a non-ASCII decimal digit after the 6th fraction digit (truncated) and rejects one in

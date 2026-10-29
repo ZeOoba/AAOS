@@ -443,10 +443,14 @@ def _now(now: datetime | None = None) -> datetime:
 
 _PY310_ISO = re.compile(
     r"(?P<head>\d{4}-\d{2}-\d{2}.\d{2}:\d{2}:\d{2})"
-    r"(?:[.,](?P<frac>\d*))?"
+    r"(?:[.,](?P<frac>\d+))?"
     r"(?:(?P<z>Z)|(?P<sign>[+-])(?P<hh>\d{2})(?::(?P<mm>\d{2})(?::(?P<ss>\d{2}))?|(?P<cmm>\d{2})(?P<css>\d{2})?)?)?",
     re.DOTALL,  # 3.11+ accepts any one character, a newline included, between date and time
 )
+
+# A '.' or ',' with no digits directly before an offset or Z. CPython 3.13.17 rejects it; 3.10's own parser
+# accepts it before a colon offset, so on 3.10 `_parse_iso_dt` must reject it explicitly (see the normaliser docstring).
+_EMPTY_FRACTION_BEFORE_OFFSET = re.compile(r"\d{4}-\d{2}-\d{2}.\d{2}:\d{2}:\d{2}[.,](?:Z|[+-].*)", re.DOTALL)
 
 
 def _normalise_iso_for_py310(text: str) -> str:
@@ -455,6 +459,10 @@ def _normalise_iso_for_py310(text: str) -> str:
     with a '.', and the offset as +HH:MM[:SS]. 3.11+ accepts all of these as written (a fraction of any
     length, truncated to 6 digits; the comma decimal; +HH, +HHMM, +HHMMSS offsets), so `_parse_iso_dt`
     only calls this below 3.11.
+
+    A decimal separator with NO digits after it ('23.Z', '23,+0000', '23.+00') is deliberately left
+    alone: CPython 3.13.17 stopped accepting it before an offset (3.11.17 and 3.13.14 still do), and this
+    function follows the newest behaviour, so `_parse_iso_dt` rejects it on 3.10 (the normaliser used to rewrite it to a plain offset).
 
     Anything else is returned unchanged, so nothing 3.11+ rejects is newly accepted: whitespace before
     the offset (3.13 accepts it only for some fraction lengths), mixed colon offsets, and the basic, week
@@ -487,6 +495,8 @@ def _parse_iso_dt(value) -> datetime:
     # differences (long or short fractions, colon-less offsets) are normalised just below.
     text = value[:-1] + "+00:00" if value.endswith("Z") and value[-2:-1].isdigit() else value
     if sys.version_info < (3, 11):
+        if _EMPTY_FRACTION_BEFORE_OFFSET.fullmatch(text):
+            raise CorruptStateError(f"unparseable datetime value {value!r}: empty fraction before the offset")
         text = _normalise_iso_for_py310(text)
     try:
         dt = datetime.fromisoformat(text)

@@ -13,6 +13,11 @@ Initial release of all five schemas (`agent-registry`, `task`, `handoff`, `event
 
 ## CLI behaviour changes (no protocol_version bump)
 
+### 2026-10-29 -- timestamps: the 3.10 normaliser follows CPython 3.13.17 (empty fraction before an offset is rejected)
+- CPython 3.13.17 `datetime.fromisoformat` stopped accepting a decimal separator with no digits directly before an offset or `Z` (`...:23.Z`, `...:23,+0000`, `...:23.+00`). 3.11.17 and 3.13.14 still accept it. `_parse_iso_dt` now rejects that shape on 3.10 (the normaliser used to rewrite it to a plain offset, and 3.10's own parser accepts it before a colon offset), so 3.10 gives the 3.13.17 answer. **On 3.11+ nothing changes: `_parse_iso_dt` is the stdlib.** Consequence: on an interpreter that still accepts the shape (3.11.x, 3.13 before 3.13.17), 3.10 is stricter than the interpreter it runs beside, for that one shape. Nothing in this repo writes it; it is a malformed stamp that happened to parse.
+- `tests/fixtures/iso_oracle_py313.json` was re-recorded on 3.13.17 by `tests/record_iso_oracle.py` (`--check` verifies the committed file). Format: `_meta`, `stable` (asserted on every interpreter) and `empty_fraction_before_offset` (45 strings, each with a `rejecting` and an `accepting` verdict; the test asserts the one matching the running interpreter).
+- The statement above, "Verified against CPython 3.13 as oracle: 0 disagreements", describes the 2026-10-17 state and is superseded for this one shape.
+
 ### 2026-10-17 -- A0.5: CLI input validation (audit M03, M43 behaviour part)
 The queue CLIs now reject invalid inputs with exit 2 *before* any lock, lease, event or state is touched:
 
