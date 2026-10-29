@@ -1,6 +1,6 @@
 # AAOS diagrams
 
-Companion to the architecture diagram in the README. Each diagram was checked against the code on `origin/main` 12ae2e4 (2026-10-03) on 2026-10-06. Where a defect is still open it is labelled. The lock/projection split is ADR-0006, which is not implemented.
+Companion to the architecture diagram in the README. Each diagram was checked against the code on `origin/main` f8f038a on 2026-10-28 (diagrams 1, 3 and 4 corrected; diagram 4 marks the not-running chain dashed). Where a defect is still open it is labelled. The lock/projection split is ADR-0006, which is not implemented.
 
 ## 1. Task lifecycle: write ordering and every exit
 
@@ -19,8 +19,9 @@ sequenceDiagram
     participant EX as expire-leases.py (weekly)
 
     A->>CT: --title --accept
-    CT->>T: atomic_write (exit 2/3 on usage/conflict)
-    CT->>S: TaskCreated (commit_state_change)
+    CT->>T: stage tmp (commit_state_change; exit 2/3 on usage/conflict)
+    CT->>S: TaskCreated (spool = commit point)
+    CT->>T: os.replace tmp -> task.json
 
     A->>LT: task_id --holder --session
     LT->>T: load (state=queued?)
@@ -103,10 +104,10 @@ flowchart LR
     LT["lease-task.py"] -->|"1. os.link create"| LOCK
     LT -->|"2. after settle: copy holder/expires"| LEASE
 
-    ACQ1["acquire_lease step 1\n(_aaos_common.py:661-687)"] -->|"READS (wrong source)"| LEASE
-    ASSERT["assert_lease_held\n(:837-851) double-run backstop"] -->|"READS (wrong source)"| LEASE
+    ACQ1["acquire_lease step 1\n(_aaos_common.py acquire_lease)"] -->|"READS (wrong source)"| LEASE
+    ASSERT["assert_lease_held\n(_aaos_common.py) double-run backstop"] -->|"READS (wrong source)"| LEASE
     CT["complete / fail / post-handoff"] --> ASSERT
-    RECL["reclaim_decision\n(:431-464) used by expire-leases"] -->|"reads (correct source)"| LOCK
+    RECL["reclaim_decision\n(_aaos_common.py) used by expire-leases"] -->|"reads (correct source)"| LOCK
 
     ACQ1 -. "disagreement window on EVERY acquisition" .- LOCK
     ASSERT -. "passes for loser during window" .- LOCK
@@ -134,4 +135,7 @@ flowchart LR
     PROJ --> PUB["publish-notion.py\nNOTION_TOKEN, 30s timeout,\nno retry/backoff, no idempotency"]
     PUB -->|"POST /v1/pages: NEW page each run"| NOTION["Notion Ops Hub (dated child pages)"]
     PUB -. "failure: exit 1, never a queue failure" .-> NONE["(no alerting on failure)"]
+    classDef planned stroke-dasharray: 4 3,stroke:#888
+    class FETCH,DH,HB,PN,PROJ,PUB,NOTION planned
 ```
+<!-- dashed = not running: no scheduled caller or no producer. diagram-verified: 2026-10-28 against origin/main f8f038a -->
