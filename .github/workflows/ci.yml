@@ -52,3 +52,47 @@ jobs:
 
       - name: Run test suite
         run: python -m unittest discover -s tests -p "test_*.py"
+
+  # Contracts check (OI-259). The test matrix above does not run tools/validate.py on the shipped
+  # example/template files or tools/check-contract-drift.py, so a schema change that breaks the
+  # sample task/handoff, or a publisher regression that writes a mirror the auditor rejects, merged
+  # silently; the scheduled fleet task would only notice the next time it ran on the operating machine.
+  # This job validates every shipped sample against its schema, then publishes the contracts into a
+  # throwaway directory and requires check-contract-drift.py to find it byte-identical to the git tree.
+  # It proves the publisher/auditor round trip on this commit, NOT the live seam (which only the
+  # operating machine can see). Python 3.10 = the interpreter inside Cowork's sandbox, which is where
+  # COWORK-BOOTSTRAP.md runs tools/validate.py. Nothing is written outside runner.temp.
+  contracts:
+    name: contracts (validate samples, publish round trip)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5.6.0
+        with:
+          python-version: '3.10'
+          cache: 'pip'
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Validate the agent registry
+        run: python tools/validate.py agent-registry.json
+
+      - name: Validate the shipped task example
+        run: python tools/validate.py examples/t-sample-001.json
+
+      - name: Validate the shipped handoff example
+        run: python tools/validate.py examples/h-sample-001.json
+
+      - name: Validate the task template
+        run: python tools/validate.py templates/task.template.json --schema task
+
+      - name: Validate the handoff template
+        run: python tools/validate.py templates/handoff.template.json --schema handoff
+
+      - name: Publish contracts to a throwaway seam
+        run: python tools/publish-contracts.py --seam-root "${{ runner.temp }}/aaos-seam"
+
+      - name: Contracts mirror matches the git tree
+        run: python tools/check-contract-drift.py --seam-root "${{ runner.temp }}/aaos-seam"

@@ -20,7 +20,7 @@ requirements.txt, .github/workflows/ci.yml"]
         PUBN["publish-notion.py\n(urllib POST)"]
         PUBC["publish-contracts.py"]
         DRIFT["check-contract-drift.py\n(read-only audit)"]
-        TESTS["tests/ (unittest; per-test tmpdir seams,\nnever the live seam)\nCI: ubuntu-latest + windows-latest, Python 3.10 + 3.11 + 3.13"]
+        TESTS["tests/ (unittest; per-test tmpdir seams,\nnever the live seam)\nCI: ubuntu-latest + windows-latest, Python 3.10 + 3.11 + 3.13\n+ contracts job: validate samples, publish to a tmp seam, drift check"]
     end
 
     subgraph SEAM["Seam: OneDrive-synced, no git: Claude_Workspace/AAOS/"]
