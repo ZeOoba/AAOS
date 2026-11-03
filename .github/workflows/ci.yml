@@ -57,11 +57,15 @@ jobs:
   # example/template files or tools/check-contract-drift.py, so a schema change that breaks the
   # sample task/handoff, or a publisher regression that writes a mirror the auditor rejects, merged
   # silently; the scheduled fleet task would only notice the next time it ran on the operating machine.
-  # This job validates every shipped sample against its schema, then publishes the contracts into a
-  # throwaway directory and requires check-contract-drift.py to find it byte-identical to the git tree.
-  # It proves the publisher/auditor round trip on this commit, NOT the live seam (which only the
-  # operating machine can see). Python 3.10 = the interpreter inside Cowork's sandbox, which is where
-  # COWORK-BOOTSTRAP.md runs tools/validate.py. Nothing is written outside runner.temp.
+  # This job validates every shipped sample against its schema (globbed, so a new examples/*.json or
+  # templates/*.template.json is covered without editing this file), then publishes the contracts into
+  # a throwaway directory and requires check-contract-drift.py to find it byte-identical. Both tools hash
+  # WORKING-TREE bytes, so the job first asserts the checkout is byte-identical to HEAD (no modified or
+  # untracked files) -- that is what makes "matches the working tree" mean "matches the git tree", and
+  # it stops a dirty tree from passing as "<sha>-dirty" on both sides. It proves the publisher/auditor
+  # round trip on this commit, NOT the live seam (which only the operating machine can see).
+  # Python 3.10 = the interpreter inside Cowork's sandbox, which is where COWORK-BOOTSTRAP.md runs
+  # tools/validate.py. Nothing is written outside runner.temp.
   contracts:
     name: contracts (validate samples, publish round trip)
     runs-on: ubuntu-latest
@@ -79,17 +83,35 @@ jobs:
       - name: Validate the agent registry
         run: python tools/validate.py agent-registry.json
 
-      - name: Validate the shipped task example
-        run: python tools/validate.py examples/t-sample-001.json
+      # Examples infer their schema from the filename (t-/h- prefix). Templates are named
+      # <schema>.template.json, so the schema is the part before ".template.json". An empty glob
+      # fails the step rather than passing vacuously.
+      - name: Validate every shipped example
+        run: |
+          shopt -s nullglob
+          files=(examples/*.json)
+          [ ${#files[@]} -gt 0 ] || { echo "no examples/*.json found"; exit 1; }
+          rc=0
+          for f in "${files[@]}"; do python tools/validate.py "$f" || rc=1; done
+          exit $rc
 
-      - name: Validate the shipped handoff example
-        run: python tools/validate.py examples/h-sample-001.json
+      - name: Validate every JSON template
+        run: |
+          shopt -s nullglob
+          files=(templates/*.template.json)
+          [ ${#files[@]} -gt 0 ] || { echo "no templates/*.template.json found"; exit 1; }
+          rc=0
+          for f in "${files[@]}"; do
+            schema="$(basename "$f" .template.json)"
+            python tools/validate.py "$f" --schema "$schema" || rc=1
+          done
+          exit $rc
 
-      - name: Validate the task template
-        run: python tools/validate.py templates/task.template.json --schema task
-
-      - name: Validate the handoff template
-        run: python tools/validate.py templates/handoff.template.json --schema handoff
+      - name: Working tree is byte-identical to HEAD
+        run: |
+          git diff --exit-code HEAD
+          untracked="$(git status --porcelain)"
+          [ -z "$untracked" ] || { echo "working tree not clean:"; echo "$untracked"; exit 1; }
 
       - name: Publish contracts to a throwaway seam
         run: python tools/publish-contracts.py --seam-root "${{ runner.temp }}/aaos-seam"
