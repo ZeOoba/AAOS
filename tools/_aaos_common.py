@@ -468,7 +468,9 @@ def _normalise_iso_for_py310(text: str) -> str:
     the offset (3.13 accepts it only for some fraction lengths), mixed colon offsets, and the basic, week
     and ordinal formats all stay as they were. Pure function; the tests run it on every Python."""
     m = _PY310_ISO.fullmatch(text)
-    if m is None:
+    # A '.'/',' with no digits after it is rejected outright by `_parse_iso_dt` (CPython disagrees with
+    # itself across patch levels), so it is left as written rather than repaired into something 3.10 accepts.
+    if m is None or m["frac"] == "":
         return text
     out = m["head"]
     if m["frac"]:
@@ -494,6 +496,12 @@ def _parse_iso_dt(value) -> datetime:
     # lowercase 'z', a doubled 'ZZ', a bare 'Z') stays rejected on 3.10 as well. The remaining 3.10-only
     # differences (long or short fractions, colon-less offsets) are normalised just below.
     text = value[:-1] + "+00:00" if value.endswith("Z") and value[-2:-1].isdigit() else value
+    # A decimal separator with no digits ('...:23.+00:00', '...:23,Z') is accepted by CPython 3.11
+    # through 3.13.14 but rejected by 3.13.17, so leaving it to fromisoformat would make the verdict
+    # depend on the interpreter's patch level. Reject it on every interpreter (fail closed).
+    m = _PY310_ISO.fullmatch(value)
+    if m is not None and m["frac"] == "":
+        raise CorruptStateError(f"unparseable datetime value {value!r}: decimal separator with no fraction digits")
     if sys.version_info < (3, 11):
         if _EMPTY_FRACTION_BEFORE_OFFSET.fullmatch(text):
             raise CorruptStateError(f"unparseable datetime value {value!r}: empty fraction before the offset")

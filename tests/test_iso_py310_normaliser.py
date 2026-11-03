@@ -14,7 +14,9 @@ accepting a '.' or ',' with no digits before an offset ('23.Z', '23,+0000'); 3.1
 The normaliser follows 3.13.17 (3.10 rejects it), so those 45 strings live in their own section with both
 answers, and the test asserts the one matching the interpreter it runs on. Everything else is patch-stable.
 Whitespace before the offset ('23 +05:30') is NOT covered: 3.13 accepts it only for some fraction
-lengths, so mirroring it would be guesswork; it stays rejected on 3.10. The same file is asserted on every interpreter CI runs, so the 3.10 leg is checked against 3.13's
+lengths, so mirroring it would be guesswork; it stays rejected on 3.10. A '.'/',' with no fraction digits
+('23:59:59.+00') is rejected by _parse_iso_dt on every interpreter: 3.13.14 accepted it, 3.13.17 rejects it,
+so the fixture records null for those 19 strings rather than either patch level's answer. The same file is asserted on every interpreter CI runs, so the 3.10 leg is checked against 3.13's
 recorded answers. The live differential (3.11+) re-derives the verdict from the interpreter itself
 over a wider generated space. Basic, week and ordinal formats are NOT covered and stay rejected on 3.10.
 """
@@ -113,6 +115,16 @@ class NamedShapes(unittest.TestCase):
         self.assertEqual(_verdict("2026-07-10T17:46:23.123456٧Z"), "2026-07-10T17:46:23.123456+00:00")
         self.assertIsNone(_verdict("2026-07-10T17:46:23.12345٧Z"))
         self.assertIsNone(_verdict("2026-07-10T17:46:23+٠٠:00"))
+
+    def test_a_separator_with_no_fraction_digits_is_rejected_on_every_interpreter(self):
+        # '23:59:59.+00' / '23:59:59,Z': CPython up to 3.13.14 (and 3.11/3.12) accept a '.'/',' with no
+        # digits, 3.13.17 rejects it. _parse_iso_dt pins the stricter answer so the verdict does not
+        # depend on the interpreter's patch level; the normaliser leaves the string alone.
+        for text in ("2026-07-10T17:46:23.Z", "2026-07-10T17:46:23,Z", "2026-07-10T17:46:23.+00:00",
+                     "2026-07-10 17:46:23,-0400", "2026-07-10_17:46:23.+00", "2026-07-10T17:46:23.+053015"):
+            with self.subTest(text=text):
+                self.assertIsNone(_verdict(text))
+                self.assertEqual(aaos._normalise_iso_for_py310(text), text)
 
     def test_already_portable_shapes_are_untouched(self):
         for text in ("2026-07-10T17:46:23.580832Z", "2026-07-10T17:46:23+00:00", "2026-07-10T11:58:06.951866-04:00"):
