@@ -125,6 +125,41 @@ class DrainToleratesUnusableLines(_SeamBase):
         self.assertEqual([p for p in self.spool.iterdir() if p.is_file()], [], "event left in pending/")
 
 
+class PendingFileWithUnhashableId(_SeamBase):
+    """Same wedge on the pending side: a pending file {"event_id": [1]} passed the truthy event_id check,
+    then raised TypeError at `not in existing_ids`, aborting every drain on every run. It is complete,
+    parseable JSON of the wrong shape, so it is quarantined like a pending object with no event_id."""
+
+    def _write_pending(self, name, obj):
+        self.spool.mkdir(parents=True, exist_ok=True)
+        path = self.spool / name
+        path.write_text(json.dumps(obj), encoding="utf-8")
+        return path
+
+    def test_drain_quarantines_unhashable_pending_id_and_folds_the_rest(self):
+        self._seed([])
+        bad = dict(_event(3), event_id=[1])
+        bad_path = self._write_pending("0000000000000000001-1-bad.json", bad)
+        good_path = aaos.spool_event(_event(2), PROJECT, root=self.root)
+        n, err = self._drain()
+        self.assertEqual(n, 1)
+        self.assertIn(_event(2)["event_id"], self._ndjson_ids())
+        self.assertFalse(good_path.exists())
+        self.assertFalse(bad_path.exists(), "unhashable-id pending file still wedging pending/")
+        corrupt = aaos._pending_corrupt_dir(PROJECT, root=self.root)
+        self.assertEqual(sorted(p.name for p in corrupt.iterdir()), [bad_path.name])
+
+    def test_read_events_survives_unhashable_pending_id(self):
+        self._seed([])
+        self._write_pending("0000000000000000001-1-bad.json", dict(_event(3), event_id={"x": 1}))
+        aaos.spool_event(_event(2), PROJECT, root=self.root)
+        err = io.StringIO()
+        with redirect_stderr(err):
+            ids = [e.get("event_id") for e in aaos.read_events(PROJECT, root=self.root)]
+        self.assertEqual(ids.count(_event(1)["event_id"]), 1)
+        self.assertEqual(ids.count(_event(2)["event_id"]), 1)
+
+
 class ReadEventsToleratesUnusableLines(_SeamBase):
     def test_read_events_survives_non_object_and_unhashable_id_lines(self):
         self._seed(NON_OBJECT_LINES + UNHASHABLE_ID_LINES)
