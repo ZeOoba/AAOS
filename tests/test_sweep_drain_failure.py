@@ -8,7 +8,7 @@ aborted on a best-effort path. emit_event already treats its own drain as best-e
 (_aaos_common.emit_event), and every per-lock emit in the sweep relies on that.
 
 Contract tested here: a drain failure prints a WARNING and the sweep proceeds, reclaiming exactly as
-it would have; aaos.UsageError (invalid --project) is NOT swallowed and still exits 2 with no WARNING;
+it would have, then exits 6 ('swept, drain failed') instead of 0; aaos.UsageError (invalid --project) is NOT swallowed and still exits 2 with no WARNING;
 --dry-run still never calls the drain.
 
 Patching note: module.aaos is the shared _aaos_common module, so patching drain_event_spool also
@@ -29,6 +29,9 @@ from test_queue_scripts import (  # noqa: E402
 )
 
 PRE_SWEEP_WARNING = "WARNING: pre-sweep drain_event_spool failed; sweeping anyway (events stay pending)"
+# Distinct nonzero exit for "sweep completed, pre-sweep drain failed" (PHASE3-DESIGN 0.4): the reclaim
+# still happens, but the scheduler and automation-health-monitor see a nonzero code, not a silent 0.
+EXIT_SWEPT_DRAIN_FAILED = 6
 
 
 def _undecodable():
@@ -80,7 +83,7 @@ class SweepSurvivesPreSweepDrainFailure(_SweepDrainBase):
         state = self._patch_drain(module, exc_factory=exc_factory, times=1)
         code, out = self.run_tool("expire-leases.py", "--now", _iso(NOW))
         self.assertGreaterEqual(state["calls"], 1, "the pre-sweep drain was never called")
-        self.assertEqual(code, 0, out)  # at HEAD: 1, 'UNEXPECTED ERROR', nothing reclaimed
+        self.assertEqual(code, EXIT_SWEPT_DRAIN_FAILED, out)  # pre-fix: 1, 'UNEXPECTED ERROR', nothing reclaimed
         self.assertIn(PRE_SWEEP_WARNING, out)
         self._assert_reclaimed(lock_file)
         # Identical to the unpatched baseline: one LeaseExpired, folded into the NDJSON.
@@ -101,13 +104,93 @@ class SweepSurvivesPreSweepDrainFailure(_SweepDrainBase):
         module = load_tool("expire-leases.py")
         self._patch_drain(module, exc_factory=lambda: RuntimeError("drain down"), times=None)
         code, out = self.run_tool("expire-leases.py", "--now", _iso(NOW))
-        self.assertEqual(code, 0, out)
+        self.assertEqual(code, EXIT_SWEPT_DRAIN_FAILED, out)
         self.assertIn(PRE_SWEEP_WARNING, out)
         self._assert_reclaimed(lock_file)
         # The per-lock emit's own drain also failed (shared module), so the event is committed to
         # pending/ but not folded: count through read_events, never raw NDJSON.
         self.assertEqual(self._all_event_types().count("LeaseExpired"), 1)
         self.assertEqual(self.count_events("LeaseExpired"), 0)
+
+
+class SweepSurvivesRealDrainFailure(_SweepDrainBase):
+    """REFUTE (c): real failures through the real drain lock and its finally path -- drain_event_spool
+    is NOT monkeypatched. The per-lock emit_event drains fail the same way, so the sweep's own events
+    stay committed in pending/ (counted as files: read_events itself cannot read a non-UTF-8 NDJSON,
+    which is exactly why the exit code must be nonzero)."""
+
+    def _spool_one(self):
+        aaos.spool_event({
+            "protocol_version": "1.0", "event_id": "e-2026-07-09T12:00:00-04:00-1", "type": "TaskCreated",
+            "actor": "system", "timestamp": "2026-07-09T12:00:00-04:00", "project_id": PROJECT,
+            "refs": {"task": "t-other"},
+        }, PROJECT, root=str(self.root))
+
+    def _pending_files(self):
+        spool = aaos.event_spool_dir(PROJECT, root=str(self.root))
+        return sorted(p.name for p in spool.iterdir() if p.is_file() and p.name.endswith(".json"))
+
+    def _assert_no_drain_lock(self):
+        self.assertFalse(aaos._drain_lock_path(PROJECT, root=str(self.root)).exists(), "drain lock left behind")
+
+    def test_non_utf8_ndjson(self):
+        lock_file = self._seed_expired()
+        log = aaos.events_log_path(PROJECT, root=str(self.root))
+        log.write_bytes(b"\xff\n")
+        self._spool_one()
+        code, out = self.run_tool("expire-leases.py", "--now", _iso(NOW))
+        self.assertEqual(code, EXIT_SWEPT_DRAIN_FAILED, out)
+        self.assertIn(PRE_SWEEP_WARNING, out)
+        self.assertIn("UnicodeDecodeError", out)
+        self._assert_reclaimed(lock_file)
+        self._assert_no_drain_lock()
+        self.assertEqual(log.read_bytes(), b"\xff\n", "NDJSON must not be rewritten by a failed drain")
+        # The pre-existing event plus the sweep's LeaseExpired are still committed in pending/.
+        self.assertEqual(len(self._pending_files()), 2)
+
+    def test_os_replace_permission_error_on_the_ndjson(self):
+        lock_file = self._seed_expired()
+        self._spool_one()
+        log = str(aaos.events_log_path(PROJECT, root=str(self.root)))
+        real_replace = aaos.os.replace
+        calls = {"n": 0}
+
+        def _replace(src, dst, *a, **kw):
+            if str(dst) == log and calls["n"] == 0:  # only the pre-sweep drain's NDJSON swap
+                calls["n"] += 1
+                raise PermissionError(13, "simulated sharing violation")
+            return real_replace(src, dst, *a, **kw)
+
+        aaos.os.replace = _replace
+        self.addCleanup(setattr, aaos.os, "replace", real_replace)
+        code, out = self.run_tool("expire-leases.py", "--now", _iso(NOW))
+        self.assertEqual(calls["n"], 1, "the simulated PermissionError never fired")
+        self.assertEqual(code, EXIT_SWEPT_DRAIN_FAILED, out)
+        self.assertIn(PRE_SWEEP_WARNING, out)
+        self.assertIn("PermissionError", out)
+        self._assert_reclaimed(lock_file)
+        self._assert_no_drain_lock()
+        # The later emit drain succeeded, so both events are folded and readable.
+        types = self._all_event_types()
+        self.assertEqual(types.count("LeaseExpired"), 1)
+        self.assertEqual(types.count("TaskCreated"), 1)
+
+    def test_clean_drain_still_exits_0(self):
+        lock_file = self._seed_expired()
+        self._spool_one()
+        code, out = self.run_tool("expire-leases.py", "--now", _iso(NOW))
+        self.assertEqual(code, 0, out)
+        self.assertNotIn("WARNING", out)
+        self._assert_reclaimed(lock_file)
+
+    def test_drain_failure_with_no_locks_dir_still_signals(self):
+        import shutil
+        shutil.rmtree(str(aaos.project_dir(PROJECT, root=str(self.root)) / "locks"))
+        aaos.events_log_path(PROJECT, root=str(self.root)).write_bytes(b"\xff\n")
+        self._spool_one()
+        code, out = self.run_tool("expire-leases.py", "--now", _iso(NOW))
+        self.assertEqual(code, EXIT_SWEPT_DRAIN_FAILED, out)
+        self.assertIn("nothing to sweep", out)
 
 
 class SweepDrainGuardBoundaries(_SweepDrainBase):
