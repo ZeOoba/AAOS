@@ -14,11 +14,9 @@ name: CI
 # UNVERIFIED until the V1 soak. The Windows legs are continue-on-error and must NOT be made a
 # required check until they are green; any baseline test that must be marked expectedFailure on
 # Windows needs its own issue and per-test reason (no blanket marking).
+# FROZEN 2026-11-05 (docs/adr/0007-freeze.md): manual runs only.
 on:
-  push:
-    branches: [main]
-  pull_request:
-    branches: [main]
+  workflow_dispatch:
 
 permissions:
   contents: read
