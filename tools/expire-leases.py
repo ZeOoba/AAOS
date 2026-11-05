@@ -8,7 +8,8 @@ Usage:
 
 See docs/PHASE3-DESIGN.md sections 1.9 and 2.6. --dry-run prints what
 would be reclaimed with zero writes/archives/events, exit 0. Otherwise:
-drain_event_spool first; for each lock file: unparseable -> emit
+drain_event_spool first (best-effort: a failure warns and the sweep
+continues); for each lock file: unparseable -> emit
 Escalated/CorruptState marker, skip, never steal. Else reclaim_decision
 (hard-expiry-primary, heartbeat classifies only -- see
 _aaos_common.reclaim_decision's docstring / PHASE3-DESIGN.md section
@@ -103,7 +104,25 @@ def main(argv=None) -> int:
             # is a real write (folds spooled events into the NDJSON) --
             # unconditional drain violated --dry-run's "zero writes" promise
             # whenever a prior failure had left events spooled.
-            aaos.drain_event_spool(args.project, root=args.seam_root, now=resolved_now)
+            #
+            # Best-effort (A1d-lite-2, audit finding #2): a drain failure used
+            # to abort the whole sweep (exit 1, nothing reclaimed), making the
+            # only scheduled reclaimer hostage to a best-effort fold. It now
+            # warns and keeps sweeping, mirroring emit_event's own drain
+            # contract. Safe because events left in pending/ are still seen by
+            # read_events, and reclaim decisions read the lock, heartbeat and
+            # task files, not the NDJSON. UsageError (invalid --project) is a
+            # real usage error mapped to exit 2, so it is never swallowed.
+            try:
+                aaos.drain_event_spool(args.project, root=args.seam_root, now=resolved_now)
+            except aaos.UsageError:
+                raise
+            except Exception as exc:
+                print(
+                    "WARNING: pre-sweep drain_event_spool failed; sweeping anyway "
+                    f"(events stay pending): {type(exc).__name__}: {exc}",
+                    file=sys.stderr,
+                )
 
         locks_dir = aaos.project_dir(args.project, root=args.seam_root) / "locks"
         if not locks_dir.is_dir():
