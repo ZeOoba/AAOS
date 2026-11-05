@@ -1507,9 +1507,17 @@ def drain_event_spool(project_id, *, root: str | None = None, now: datetime | No
                 if not line:
                     continue
                 try:
-                    existing_ids.add(json.loads(line).get("event_id"))
+                    obj = json.loads(line)
                 except json.JSONDecodeError:
                     continue
+                # A line that parses but is not an object ([], 1, "x", null), or whose event_id is
+                # unhashable ({"event_id": []}), carries no usable id. It used to raise AttributeError /
+                # TypeError here, aborting every drain before any write -- a silent wedge, since emit_event
+                # swallows drain failures (A1d-lite-1). Skip it for dedup only; existing_content is still
+                # re-written verbatim below. JSON values are str/int/float/bool/None/list/dict, so excluding
+                # list and dict leaves the dedup set unchanged for every line that used to work.
+                if isinstance(obj, dict) and not isinstance(obj.get("event_id"), (list, dict)):
+                    existing_ids.add(obj.get("event_id"))
 
         corrupt_dir = _pending_corrupt_dir(project_id, root=root)
         drained_dir = _pending_drained_dir(project_id, root=root)
@@ -1558,9 +1566,15 @@ def drain_event_spool(project_id, *, root: str | None = None, now: datetime | No
                 # Possibly a half-synced (truncated) file: grace window applies.
                 _defer_or_quarantine_pending(p, name, corrupt_dir, exc)
                 continue
-            if not isinstance(event, dict) or not event.get("event_id"):
+            if (
+                not isinstance(event, dict)
+                or not event.get("event_id")
+                or isinstance(event.get("event_id"), (list, dict))
+            ):
                 # Complete, parseable JSON of the wrong shape is not a sync artifact: quarantine now.
-                _quarantine_pending(p, name, corrupt_dir, "pending event missing event_id or not an object")
+                # An unhashable event_id ({"event_id": [1]}) would otherwise raise TypeError at the
+                # `not in existing_ids` check below and wedge every drain on this file (A1d-lite-1).
+                _quarantine_pending(p, name, corrupt_dir, "pending event missing event_id, unhashable event_id, or not an object")
                 continue
 
             # A file deferred by an earlier drain (transient read error or grace window) folds here,
@@ -1624,7 +1638,9 @@ def read_events(project_id, *, root: str | None = None) -> list[dict]:
             if not isinstance(event, dict):
                 continue
             event_id = event.get("event_id")
-            if event_id is not None:
+            # An unhashable id ({"event_id": []}) used to raise TypeError at `in seen_ids` and crash
+            # every reader (A1d-lite-1). Treat it like a missing id: returned, never deduped.
+            if event_id is not None and not isinstance(event_id, (list, dict)):
                 if event_id in seen_ids:
                     continue
                 seen_ids.add(event_id)
@@ -1674,7 +1690,9 @@ def read_events(project_id, *, root: str | None = None) -> list[dict]:
                 )
                 continue
             event_id = event.get("event_id")
-            if event_id is not None:
+            # An unhashable id ({"event_id": []}) used to raise TypeError at `in seen_ids` and crash
+            # every reader (A1d-lite-1). Treat it like a missing id: returned, never deduped.
+            if event_id is not None and not isinstance(event_id, (list, dict)):
                 if event_id in seen_ids:
                     continue
                 seen_ids.add(event_id)
