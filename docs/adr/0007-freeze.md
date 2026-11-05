@@ -51,3 +51,7 @@ A real cross-surface task, meaning work that must move between Claude Code and C
 | `fix/review-findings-a0x` | `eb8fef0d3ddb33f1cfc12f160e21fd6c857553c1` | 2026-10-17 |
 | `fix/transient-error-never-quarantines` | `9a34860c3b03fa5e8b5bff719a1b0aa709e177ed` | 2026-10-17 |
 | `worktree-oi265-lease-ownership-spec` | `598ef5148611466df9dc3e3978d107ead8924d9b` | 2026-09-10 |
+
+## Addendum (2026-11-05, same day): what actually happened
+- **Branches.** The 31 branches in the table above were deleted (exact name and SHA match). Two branches pushed after this ADR was written were **kept**, unmerged: `fix/t1-drain-non-object-ndjson` (a674e56eb79ac02099ecdd9fe664260c55b5e06a) and `fix/t2-sweep-survives-drain-failure` (bf0b8cf6145398eb49fb9c01b4baf4b169a89f9b). They were opened as AAOS#38/#39 by a concurrent eval-plan session and closed unmerged under this freeze, on Gabriel's ruling. They still exist on the remote and need no restore.
+- **Scheduled tasks.** Retirement of `ora-aaos-expire-leases` and `ora-aaos-publish-contracts` is **ratified but not yet executed**. The MCP delete gate refused `delete_scheduled_task` (store-scan timeout; tracked as OI-396 in `~/.claude` memory). Both remain registered with `enabled:false` and are listed in `~/.claude/maintenance/_state/retire-pending.json`, so no resume can re-enable them. Their spec folders are not yet archived.
