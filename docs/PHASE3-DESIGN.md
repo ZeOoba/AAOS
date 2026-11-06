@@ -34,6 +34,7 @@ All timestamps serialize via `dt.isoformat()`; parse via `datetime.fromisoformat
 | 3 | state-conflict / precondition unmet (task not queued, lease DENIED, write-once conflict) |
 | 4 | CONTESTED / lease-lost (concurrency fail-closed) |
 | 5 | event-commit failure (`emit_event` could neither append nor spool) → state left unchanged |
+| 6 | `expire-leases.py` only: sweep completed (every reclaim decided and committed) but the pre-sweep `drain_event_spool` failed; spooled events stay in `pending/` and the event log may be unreadable to `read_events` until repaired (A1d-lite-2, 2026-11-05) |
 
 ---
 

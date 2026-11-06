@@ -19,6 +19,7 @@ and asserts the pre-sweep WARNING line specifically, not a single WARNING. Temp 
 """
 from __future__ import annotations
 
+import json
 import sys
 from pathlib import Path
 
@@ -145,8 +146,11 @@ class SweepSurvivesRealDrainFailure(_SweepDrainBase):
         self._assert_reclaimed(lock_file)
         self._assert_no_drain_lock()
         self.assertEqual(log.read_bytes(), b"\xff\n", "NDJSON must not be rewritten by a failed drain")
-        # The pre-existing event plus the sweep's LeaseExpired are still committed in pending/.
-        self.assertEqual(len(self._pending_files()), 2)
+        # The pre-existing event plus the sweep's own events (LeaseExpired, and Escalated/DeadAgent since
+        # no heartbeat is seeded) are still committed in pending/, not lost.
+        spool = aaos.event_spool_dir(PROJECT, root=str(self.root))
+        types = sorted(json.loads((spool / n).read_text(encoding="utf-8"))["type"] for n in self._pending_files())
+        self.assertEqual(types, ["Escalated", "LeaseExpired", "TaskCreated"])
 
     def test_os_replace_permission_error_on_the_ndjson(self):
         lock_file = self._seed_expired()

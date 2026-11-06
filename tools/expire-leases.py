@@ -8,8 +8,8 @@ Usage:
 
 See docs/PHASE3-DESIGN.md sections 1.9 and 2.6. --dry-run prints what
 would be reclaimed with zero writes/archives/events, exit 0. Otherwise:
-drain_event_spool first (best-effort: a failure warns and the sweep
-continues); for each lock file: unparseable -> emit
+drain_event_spool first (best-effort: a failure warns, the sweep
+continues, and the run exits 6 instead of 0); for each lock file: unparseable -> emit
 Escalated/CorruptState marker, skip, never steal. Else reclaim_decision
 (hard-expiry-primary, heartbeat classifies only -- see
 _aaos_common.reclaim_decision's docstring / PHASE3-DESIGN.md section
@@ -44,6 +44,11 @@ validation on a reclaim, or an event-commit failure) propagates.
       "no locks directory; nothing to sweep" even when the whole seam was
       gone, masking a broken seam as a clean empty sweep)
     5 event-commit failure
+    6 sweep completed, but the pre-sweep drain_event_spool failed (A1d-lite-2):
+      every reclaim decision was still made and committed, but spooled
+      events were not folded into the NDJSON, and the NDJSON may itself be
+      unreadable (read_events can raise). Nonzero so a scheduler or
+      automation-health-monitor sees it; the stderr WARNING names the cause.
 """
 from __future__ import annotations
 
@@ -51,6 +56,9 @@ import argparse
 import sys
 
 import _aaos_common as aaos
+
+# PHASE3-DESIGN.md section 0.4: expire-leases-specific "swept, drain failed".
+EXIT_SWEPT_DRAIN_FAILED = 6
 
 
 def _add_common_args(parser: argparse.ArgumentParser) -> None:
@@ -96,6 +104,7 @@ def _escalate_corrupt(project, root, resolved_now, entry, dry_run):
 
 def main(argv=None) -> int:
     args = build_arg_parser().parse_args(argv)
+    drain_failed = False
     try:
         resolved_now = _resolve_now(args.now)
         aaos.require_seam_reachable(args.seam_root)
@@ -108,16 +117,22 @@ def main(argv=None) -> int:
             # Best-effort (A1d-lite-2, audit finding #2): a drain failure used
             # to abort the whole sweep (exit 1, nothing reclaimed), making the
             # only scheduled reclaimer hostage to a best-effort fold. It now
-            # warns and keeps sweeping, mirroring emit_event's own drain
-            # contract. Safe because events left in pending/ are still seen by
-            # read_events, and reclaim decisions read the lock, heartbeat and
-            # task files, not the NDJSON. UsageError (invalid --project) is a
-            # real usage error mapped to exit 2, so it is never swallowed.
+            # warns, keeps sweeping, and exits EXIT_SWEPT_DRAIN_FAILED (6).
+            # Why sweeping anyway is sound: reclaim decisions read only the
+            # lock, heartbeat and task files, never the event log, so a failed
+            # fold cannot change any of them. Why the run must still be
+            # nonzero: the failure is NOT harmless to readers. Whatever broke
+            # the drain can break read_events too (a non-UTF-8 NDJSON makes
+            # both raise UnicodeDecodeError), so fail-task's DoubleFailure
+            # check and the projection may be blind until it is repaired.
+            # UsageError (invalid --project) maps to exit 2 and is never
+            # swallowed.
             try:
                 aaos.drain_event_spool(args.project, root=args.seam_root, now=resolved_now)
             except aaos.UsageError:
                 raise
             except Exception as exc:
+                drain_failed = True
                 print(
                     "WARNING: pre-sweep drain_event_spool failed; sweeping anyway "
                     f"(events stay pending): {type(exc).__name__}: {exc}",
@@ -127,7 +142,7 @@ def main(argv=None) -> int:
         locks_dir = aaos.project_dir(args.project, root=args.seam_root) / "locks"
         if not locks_dir.is_dir():
             print("no locks directory; nothing to sweep")
-            return 0
+            return EXIT_SWEPT_DRAIN_FAILED if drain_failed else 0
 
         heartbeat = aaos.load_heartbeat(root=args.seam_root)
 
@@ -239,7 +254,7 @@ def main(argv=None) -> int:
                 )
                 print(f"ESCALATED: {task_id} DeadAgent")
 
-        return 0
+        return EXIT_SWEPT_DRAIN_FAILED if drain_failed else 0
 
     except aaos.UsageError as exc:
         print(f"USAGE ERROR: {exc}", file=sys.stderr)
