@@ -139,7 +139,7 @@ AAOS/
 │   ├── project-notion.py        pure local read (tasks+events+heartbeat) -> a Notion-bound payload
 │   ├── publish-contracts.py     copies schemas/docs/registry/templates from this git tree to the seam mirror
 │   ├── publish-notion.py        POSTs project-notion.py's local payload to the Notion Ops Hub
-│   │                            (stdlib urllib, NOTION_TOKEN env var, --dry-run supported)
+│   │                            (stdlib urllib; dry-run by default, --live needs AAOS_NOTION_TOKEN + AAOS_UNFREEZE=1)
 │   └── check-contract-drift.py  read-only guard: has the seam mirror drifted from the git tree?
 ├── requirements.txt        dependency floor: jsonschema>=4.18
 ├── .github/workflows/ci.yml  GitHub Actions: runs the suite on push/PR to main (Python 3.10, 3.11, 3.13)
@@ -222,9 +222,9 @@ python tools/check-contract-drift.py [--seam-root <dir>] [--source-commit <sha>]
 **Publish the Notion projection** (the one live network call in this repo):
 ```
 python tools/project-notion.py [--project ora-ops] [--out <path>]
-python tools/publish-notion.py [--project ora-ops] [--in <path>] [--parent-page-id <id>] [--dry-run]
+python tools/publish-notion.py [--project ora-ops] [--in <path>] [--parent-page-id <id>] [--dry-run | --live]
 ```
-Requires `NOTION_TOKEN` in the environment unless `--dry-run`; POSTs a dated child page under the Notion Ops Hub (`32b6ecd8…`), matching the existing child-page convention (Daily Brief, Automation Health, Outbox QC, …) rather than a parallel database.
+Dry-run by default (prints the request body). `--live` requires `AAOS_NOTION_TOKEN` (the generic `NOTION_TOKEN` is not read) and, while AAOS is frozen, `AAOS_UNFREEZE=1` (ADR-0007 addendum 2026-11-12); task ids and titles are always sent as `sha256:` hashes. With `--live` it POSTs a dated child page under the Notion Ops Hub (`32b6ecd8…`), matching the existing child-page convention (Daily Brief, Automation Health, Outbox QC, …) rather than a parallel database.
 
 `tools/expire-leases.py` **is registered** on ORA's CC/MCP scheduled-task fleet as `ora-aaos-expire-leases` (live since 2026-07-10; cadence 6x→3x/day on 2026-07-16, →1x/day on 2026-08-05, →weekly on 2026-09-13; cron `20 7 * * 1`, Mondays 07:20 ET) — it runs unattended. The weekly cadence widens the worst-case stale-lock reclaim window to ~7 days; it was chosen because `locks/` has held no live lock and the event log no new event since 2026-08-16, and should revert to daily if the seam queue becomes active again. The live registry is the authority for this cron, not this file. The manual invocation above is only for out-of-cadence intervention (see `docs/OPERATIONS.md` §2).
 

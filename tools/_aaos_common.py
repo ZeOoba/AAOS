@@ -56,6 +56,12 @@ SCHEMA_DIR = REPO_ROOT / "schemas"
 
 # 0.1 Runtime state root = the seam, not the git tree.
 DEFAULT_SEAM_ROOT = r"C:/Users/Owner/OneDrive - Oxford Capital Partners/Claude_Workspace/AAOS"
+# The live production seam the freeze sentinel guards (docs/adr/0007-freeze.md, addendum
+# 2026-11-12). Kept separate from DEFAULT_SEAM_ROOT so tests that patch the default to an in-tmp
+# sentinel are not mistaken for the live seam; seam_root() refuses this path, by any route,
+# unless AAOS_UNFREEZE=1. The revival ADR removes the sentinel.
+LIVE_SEAM_ROOT = DEFAULT_SEAM_ROOT
+UNFREEZE_ENV = "AAOS_UNFREEZE"
 
 PROJECT_ID_RE = re.compile(r"^[a-z][a-z0-9-]*$")
 # Mirror schemas/task.schema.json and handoff.schema.json "id" patterns. Used
@@ -199,12 +205,62 @@ def _validate_handoff_id(handoff_id) -> str:
     return _validate_id(handoff_id, HANDOFF_ID_RE, "handoff id")
 
 
+def unfreeze_enabled() -> bool:
+    """True only when AAOS_UNFREEZE is exactly "1" (docs/adr/0007-freeze.md, addendum
+    2026-11-12). Anything else, including "true" or " 1", leaves the freeze in force."""
+    return os.environ.get(UNFREEZE_ENV) == "1"
+
+
+def _seam_key(path: str) -> str:
+    """Lexical comparison key: forward slashes, "."/".." collapsed, no trailing slash, and
+    case-folded on Windows. Pure string work -- no filesystem access."""
+    s = posixpath.normpath(str(path).replace("\\", "/"))
+    if s != "/":
+        s = s.rstrip("/")
+    return s.lower() if os.name == "nt" else s
+
+
+def _is_live_seam(candidate: str) -> bool:
+    """True if `candidate` is, or resolves to, LIVE_SEAM_ROOT.
+
+    The lexical checks run first and never touch the filesystem, so refusing a literal spelling
+    of the live path performs no I/O against it. Only if those miss is the CANDIDATE's realpath
+    taken (resolving a junction/symlink alias); the live path itself is never stat'ed or opened.
+    LIVE_SEAM_ROOT is read at call time so tests can point it at a decoy."""
+    live = LIVE_SEAM_ROOT
+    live_keys = {_seam_key(live), _seam_key(os.path.abspath(live))}
+    if _seam_key(candidate) in live_keys or _seam_key(os.path.abspath(candidate)) in live_keys:
+        return True
+    try:
+        return _seam_key(os.path.realpath(candidate)) in live_keys
+    except (OSError, ValueError):
+        return False
+
+
+def _refuse_if_frozen_live(candidate: str, route: str) -> None:
+    if unfreeze_enabled() or not _is_live_seam(candidate):
+        return
+    raise UsageError(
+        f"AAOS is FROZEN (docs/adr/0007-freeze.md): refusing to use the live seam "
+        f"'{candidate}' (selected via {route}). Point --seam-root/AAOS_SEAM_ROOT at a copy or a "
+        f"test seam, or set {UNFREEZE_ENV}=1 only under a revival ADR that un-freezes AAOS."
+    )
+
+
 def seam_root(override: str | None = None) -> Path:
+    """Resolve the seam root: explicit override, then $AAOS_SEAM_ROOT, then DEFAULT_SEAM_ROOT.
+
+    Freeze sentinel (ADR-0007 addendum 2026-11-12): whichever route is taken, a root that is or
+    resolves to LIVE_SEAM_ROOT raises UsageError unless AAOS_UNFREEZE=1. Every path builder and
+    require_seam_reachable() goes through here, so every seam CLI fails closed (exit 2)."""
     if override:
+        _refuse_if_frozen_live(override, "--seam-root/root override")
         return Path(override)
     env = os.environ.get("AAOS_SEAM_ROOT")
     if env:
+        _refuse_if_frozen_live(env, "AAOS_SEAM_ROOT")
         return Path(env)
+    _refuse_if_frozen_live(DEFAULT_SEAM_ROOT, "the built-in default")
     return Path(DEFAULT_SEAM_ROOT)
 
 

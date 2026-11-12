@@ -40,6 +40,14 @@ from _tool_loader import load_tool  # noqa: E402
 
 MODULE_FILENAME = "publish-notion.py"
 
+UNFROZEN = {"AAOS_UNFREEZE": "1"}
+
+
+def _h(text: str) -> str:
+    """Expected redacted form of a free-text cell (ADR-0007 addendum 2026-11-12)."""
+    import hashlib
+    return "sha256:" + hashlib.sha256(text.encode("utf-8")).hexdigest()[:12]
+
 SAMPLE_PAYLOAD = {
     "generation": {
         "generated_at": "2026-07-26T12:00:00+00:00",
@@ -49,8 +57,8 @@ SAMPLE_PAYLOAD = {
     },
     "rows": [
         {
-            "task_id": "t-noi-crosscheck",
-            "title": "Wire NOI cross-check into gate",
+            "task_id": "t-synthetic-parcel-alpha",
+            "title": "Synthetic Parcel Alpha LOI follow-up",
             "state": "in-progress",
             "owner_agent": "claude-code",
             "priority": 1,
@@ -88,9 +96,9 @@ class BuildPayloadTests(unittest.TestCase):
         # header row + 1 data row
         self.assertEqual(len(table_block["table"]["children"]), 2)
         header_cells = table_block["table"]["children"][0]["table_row"]["cells"]
-        self.assertEqual(header_cells[0][0]["text"]["content"], "Task ID")
+        self.assertEqual(header_cells[0][0]["text"]["content"], "Task ID (sha256)")
         data_cells = table_block["table"]["children"][1]["table_row"]["cells"]
-        self.assertEqual(data_cells[0][0]["text"]["content"], "t-noi-crosscheck")
+        self.assertEqual(data_cells[0][0]["text"]["content"], _h("t-synthetic-parcel-alpha"))
 
     def test_empty_rows_still_produces_a_valid_header_only_table(self):
         empty = {"generation": SAMPLE_PAYLOAD["generation"], "rows": []}
@@ -107,6 +115,27 @@ class BuildPayloadTests(unittest.TestCase):
         paragraphs = [c for c in body["children"] if c["type"] == "paragraph"]
         joined = " ".join(p["paragraph"]["rich_text"][0]["text"]["content"] for p in paragraphs)
         self.assertIn("STALE", joined)
+
+    def test_free_text_cells_are_hashed_never_verbatim(self):
+        """Finding 1 (ADR-0007 addendum 2026-11-12): task titles and task ids are free text and may
+        carry a confidential deal identifier, so they never leave the machine verbatim."""
+        body = self.module.build_notion_page_payload(SAMPLE_PAYLOAD, "ora-ops", "abc123", "now")
+        blob = json.dumps(body)
+        self.assertNotIn("Synthetic Parcel Alpha", blob)
+        self.assertNotIn("synthetic-parcel-alpha", blob)
+        table = next(c for c in body["children"] if c["type"] == "table")
+        data_cells = table["table"]["children"][1]["table_row"]["cells"]
+        self.assertEqual(data_cells[1][0]["text"]["content"], _h("Synthetic Parcel Alpha LOI follow-up"))
+        # Schema-bound enum fields are unchanged.
+        self.assertEqual(data_cells[2][0]["text"]["content"], "in-progress")
+
+    def test_missing_title_is_left_empty_not_hashed(self):
+        row = dict(SAMPLE_PAYLOAD["rows"][0], title=None)
+        body = self.module.build_notion_page_payload(
+            {"generation": SAMPLE_PAYLOAD["generation"], "rows": [row]}, "ora-ops", "abc123", "now")
+        table = next(c for c in body["children"] if c["type"] == "table")
+        cells = table["table"]["children"][1]["table_row"]["cells"]
+        self.assertEqual(cells[1][0]["text"]["content"], "")
 
     def test_missing_generation_key_raises_usage_error(self):
         with self.assertRaises(self.module.aaos.UsageError):
@@ -135,10 +164,14 @@ class NormalizePageIdTests(unittest.TestCase):
 
 
 class PublishTests(unittest.TestCase):
-    """publish() tests: dry-run, mocked success, mocked failure."""
+    """publish() tests: dry-run, mocked success, mocked failure. The live-path tests run with the
+    freeze sentinel set (AAOS_UNFREEZE=1) and urlopen mocked -- no test makes a network call."""
 
     def setUp(self):
         self.module = load_tool(MODULE_FILENAME)
+        env = patch.dict("os.environ", UNFROZEN)
+        env.start()
+        self.addCleanup(env.stop)
         self.tmpdir = Path(tempfile.mkdtemp())
         self.payload_path = self.tmpdir / "notion-projection.json"
         self.payload_path.write_text(json.dumps(SAMPLE_PAYLOAD), encoding="utf-8")
@@ -150,7 +183,7 @@ class PublishTests(unittest.TestCase):
         with patch("urllib.request.urlopen") as mock_urlopen:
             body = self.module.publish(
                 self.payload_path, project="ora-ops", parent_page_id="abc123",
-                token=None, dry_run=True, now_iso="2026-07-26T00:00:00",
+                token=None, live=False, now_iso="2026-07-26T00:00:00",
             )
         mock_urlopen.assert_not_called()
         self.assertEqual(body["parent"], {"page_id": "abc123"})
@@ -159,7 +192,7 @@ class PublishTests(unittest.TestCase):
         with self.assertRaises(self.module.aaos.UsageError):
             self.module.publish(
                 self.tmpdir / "does-not-exist.json", project="ora-ops",
-                parent_page_id="abc123", token=None, dry_run=True, now_iso="now",
+                parent_page_id="abc123", token=None, live=False, now_iso="now",
             )
 
     def test_malformed_json_raises_usage_error(self):
@@ -168,15 +201,28 @@ class PublishTests(unittest.TestCase):
         with self.assertRaises(self.module.aaos.UsageError):
             self.module.publish(
                 bad, project="ora-ops", parent_page_id="abc123",
-                token=None, dry_run=True, now_iso="now",
+                token=None, live=False, now_iso="now",
             )
 
     def test_missing_token_without_dry_run_raises_usage_error(self):
         with self.assertRaises(self.module.aaos.UsageError):
             self.module.publish(
                 self.payload_path, project="ora-ops", parent_page_id="abc123",
-                token=None, dry_run=False, now_iso="now",
+                token=None, live=True, now_iso="now",
             )
+
+    def test_live_refused_while_frozen_at_the_function_level(self):
+        """The gate lives in publish(), not only in main(): a programmatic caller is also refused."""
+        import os
+        os.environ.pop("AAOS_UNFREEZE", None)
+        with patch("urllib.request.urlopen") as net:
+            with self.assertRaises(self.module.aaos.UsageError) as ctx:
+                self.module.publish(
+                    self.payload_path, project="ora-ops", parent_page_id="abc123",
+                    token="ntn_faketoken", live=True, now_iso="now",
+                )
+        self.assertIn("FROZEN", str(ctx.exception))
+        net.assert_not_called()
 
     def test_successful_post_sends_expected_request(self):
         captured = {}
@@ -199,7 +245,7 @@ class PublishTests(unittest.TestCase):
         with patch("urllib.request.urlopen", side_effect=_fake_urlopen):
             body = self.module.publish(
                 self.payload_path, project="ora-ops", parent_page_id="abc123",
-                token="ntn_faketoken", dry_run=False, now_iso="2026-07-26T00:00:00",
+                token="ntn_faketoken", live=True, now_iso="2026-07-26T00:00:00",
             )
 
         self.assertEqual(captured["url"], "https://api.notion.com/v1/pages")
@@ -219,7 +265,7 @@ class PublishTests(unittest.TestCase):
             with self.assertRaises(self.module.PublishError):
                 self.module.publish(
                     self.payload_path, project="ora-ops", parent_page_id="abc123",
-                    token="ntn_badtoken", dry_run=False, now_iso="now",
+                    token="ntn_badtoken", live=True, now_iso="now",
                 )
 
     def test_url_error_raises_publish_error(self):
@@ -230,30 +276,96 @@ class PublishTests(unittest.TestCase):
             with self.assertRaises(self.module.PublishError):
                 self.module.publish(
                     self.payload_path, project="ora-ops", parent_page_id="abc123",
-                    token="ntn_sometoken", dry_run=False, now_iso="now",
+                    token="ntn_sometoken", live=True, now_iso="now",
                 )
 
 
 class MainCliTests(unittest.TestCase):
-    """CLI-layer exit-code tests."""
+    """CLI-layer exit-code tests. Every test runs with a scrubbed environment (no AAOS_UNFREEZE,
+    no token variables) unless it sets them itself, and with urlopen mocked."""
 
     def setUp(self):
         self.module = load_tool(MODULE_FILENAME)
         self.tmpdir = Path(tempfile.mkdtemp())
         self.payload_path = self.tmpdir / "notion-projection.json"
         self.payload_path.write_text(json.dumps(SAMPLE_PAYLOAD), encoding="utf-8")
+        import os
+        scrubbed = {k: v for k, v in os.environ.items()
+                    if k not in ("AAOS_UNFREEZE", "AAOS_NOTION_TOKEN", "NOTION_TOKEN")}
+        env = patch.dict("os.environ", scrubbed, clear=True)
+        env.start()
+        self.addCleanup(env.stop)
+        net = patch("urllib.request.urlopen")
+        self.urlopen = net.start()
+        self.addCleanup(net.stop)
 
     def tearDown(self):
         shutil.rmtree(self.tmpdir, ignore_errors=True)
 
+    def _main(self, argv, env=None):
+        out, err = io.StringIO(), io.StringIO()
+        with patch.dict("os.environ", env or {}), patch("sys.stdout", out), patch("sys.stderr", err):
+            code = self.module.main(argv)
+        return code, out.getvalue(), err.getvalue()
+
     def test_dry_run_exits_zero_and_prints_body(self):
-        buf = io.StringIO()
-        with patch("sys.stdout", buf):
-            code = self.module.main(["--in", str(self.payload_path), "--dry-run", "--now", "2026-07-26T00:00:00+00:00"])
+        code, out, _ = self._main(["--in", str(self.payload_path), "--dry-run", "--now", "2026-07-26T00:00:00+00:00"])
         self.assertEqual(code, 0)
-        printed = json.loads(buf.getvalue())
+        printed = json.loads(out)
         self.assertIn("parent", printed)
         self.assertIn("2026-07-26T00:00:00+00:00", json.dumps(printed))
+
+    def test_default_is_dry_run_even_with_every_token_and_the_sentinel_set(self):
+        """Finding 2: no flags must never POST, whatever ambient env is set."""
+        env = {"NOTION_TOKEN": "ntn_x", "AAOS_NOTION_TOKEN": "ntn_y", **UNFROZEN}
+        code, out, _ = self._main(["--in", str(self.payload_path), "--now", "2026-07-26T00:00:00+00:00"], env)
+        self.assertEqual(code, 0)
+        self.assertIn("parent", json.loads(out))
+        self.urlopen.assert_not_called()
+
+    def test_live_refused_while_frozen_even_with_token(self):
+        code, _, err = self._main(["--in", str(self.payload_path), "--live"], {"AAOS_NOTION_TOKEN": "ntn_y"})
+        self.assertEqual(code, 2)
+        self.assertIn("FROZEN", err)
+        self.assertIn("0007", err)
+        self.urlopen.assert_not_called()
+
+    def test_live_ignores_generic_notion_token(self):
+        code, _, err = self._main(["--in", str(self.payload_path), "--live"], {"NOTION_TOKEN": "ntn_x", **UNFROZEN})
+        self.assertEqual(code, 2)
+        self.assertIn("AAOS_NOTION_TOKEN", err)
+        self.urlopen.assert_not_called()
+
+    def test_live_with_sentinel_and_aaos_token_posts_hashed_payload(self):
+        captured = {}
+
+        class _Resp:
+            def __enter__(self):
+                return self
+            def __exit__(self, *a):
+                return False
+            def read(self):
+                return b"{}"
+
+        def _fake(request, timeout=None):
+            captured["auth"] = dict((k.lower(), v) for k, v in request.header_items())["authorization"]
+            captured["data"] = request.data.decode("utf-8")
+            return _Resp()
+
+        self.urlopen.side_effect = _fake
+        code, out, _ = self._main(["--in", str(self.payload_path), "--live", "--now", "2026-07-26T00:00:00+00:00"],
+                                  {"AAOS_NOTION_TOKEN": " ntn_y\n", "NOTION_TOKEN": "ntn_x", **UNFROZEN})
+        self.assertEqual(code, 0, out)
+        self.assertEqual(captured["auth"], "Bearer ntn_y")
+        self.assertNotIn("Synthetic Parcel Alpha", captured["data"])
+        self.assertNotIn("synthetic-parcel-alpha", captured["data"])
+        self.assertIn(_h("Synthetic Parcel Alpha LOI follow-up"), captured["data"])
+
+    def test_live_and_dry_run_are_mutually_exclusive(self):
+        with self.assertRaises(SystemExit) as ctx:
+            self._main(["--in", str(self.payload_path), "--live", "--dry-run"], UNFROZEN)
+        self.assertEqual(ctx.exception.code, 2)
+        self.urlopen.assert_not_called()
 
     def test_naive_or_garbage_now_exits_2_before_any_network_call(self):
         """Audit review finding: publish-notion is the egress tool, and --now becomes the page title
@@ -261,54 +373,37 @@ class MainCliTests(unittest.TestCase):
         must do so BEFORE building a request or touching the network."""
         for bad in ("2026-07-26T00:00:00", "garbage", "2026-07-26"):
             with self.subTest(now=bad):
-                buf = io.StringIO()
-                with patch("urllib.request.urlopen") as fake_urlopen, patch("sys.stderr", buf):
-                    with patch.dict("os.environ", {"NOTION_TOKEN": "ntn_x"}):
-                        code = self.module.main(["--in", str(self.payload_path), "--now", bad])
+                code, _, err = self._main(["--in", str(self.payload_path), "--live", "--now", bad],
+                                          {"AAOS_NOTION_TOKEN": "ntn_x", **UNFROZEN})
                 self.assertEqual(code, 2)
-                self.assertIn("USAGE ERROR", buf.getvalue())
-                self.assertIn("--now", buf.getvalue())
-                fake_urlopen.assert_not_called()
+                self.assertIn("USAGE ERROR", err)
+                self.assertIn("--now", err)
+                self.urlopen.assert_not_called()
 
     def test_missing_payload_exits_2(self):
-        buf = io.StringIO()
-        with patch("sys.stderr", buf):
-            code = self.module.main(
-                ["--in", str(self.tmpdir / "nope.json"), "--dry-run"]
-            )
+        code, _, err = self._main(["--in", str(self.tmpdir / "nope.json"), "--dry-run"])
         self.assertEqual(code, 2)
-        self.assertIn("USAGE ERROR", buf.getvalue())
+        self.assertIn("USAGE ERROR", err)
 
     def test_bad_parent_page_id_exits_2(self):
-        buf = io.StringIO()
-        with patch("sys.stderr", buf):
-            code = self.module.main(
-                ["--in", str(self.payload_path), "--dry-run", "--parent-page-id", "nope"]
-            )
+        code, _, _ = self._main(["--in", str(self.payload_path), "--dry-run", "--parent-page-id", "nope"])
         self.assertEqual(code, 2)
 
-    def test_no_token_no_dry_run_exits_2(self):
-        buf = io.StringIO()
-        with patch.dict("os.environ", {}, clear=False):
-            import os
-            os.environ.pop("NOTION_TOKEN", None)
-            with patch("sys.stderr", buf):
-                code = self.module.main(["--in", str(self.payload_path)])
+    def test_live_without_token_exits_2(self):
+        code, _, err = self._main(["--in", str(self.payload_path), "--live"], UNFROZEN)
         self.assertEqual(code, 2)
+        self.assertIn("AAOS_NOTION_TOKEN", err)
+        self.urlopen.assert_not_called()
 
     def test_publish_failure_exits_1(self):
-        def _raise_http_error(request, timeout=None):
-            raise urllib.error.HTTPError(
-                url="https://api.notion.com/v1/pages", code=500,
-                msg="Server Error", hdrs=None, fp=io.BytesIO(b"{}"),
-            )
-        buf = io.StringIO()
-        with patch("urllib.request.urlopen", side_effect=_raise_http_error):
-            with patch.dict("os.environ", {"NOTION_TOKEN": "ntn_x"}):
-                with patch("sys.stderr", buf):
-                    code = self.module.main(["--in", str(self.payload_path)])
+        self.urlopen.side_effect = urllib.error.HTTPError(
+            url="https://api.notion.com/v1/pages", code=500,
+            msg="Server Error", hdrs=None, fp=io.BytesIO(b"{}"),
+        )
+        code, _, err = self._main(["--in", str(self.payload_path), "--live"],
+                                  {"AAOS_NOTION_TOKEN": "ntn_x", **UNFROZEN})
         self.assertEqual(code, 1)
-        self.assertIn("PUBLISH FAILED", buf.getvalue())
+        self.assertIn("PUBLISH FAILED", err)
 
 
 if __name__ == "__main__":

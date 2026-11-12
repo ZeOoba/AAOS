@@ -27,32 +27,43 @@ split and publish-contracts.py's plan/execute split):
                                     read (now_iso is a parameter).
     publish()                     -- thin IO wrapper: reads the payload
                                     file, calls the pure builder, then
-                                    performs (or, with --dry-run, prints
-                                    without performing) the actual POST.
+                                    performs (only with --live) or prints
+                                    without performing the actual POST.
+
+FAIL-CLOSED DEFAULTS (docs/adr/0007-freeze.md, addendum 2026-11-12):
+    * Dry-run is the default. A live POST needs ALL of: --live, the
+      AAOS-specific token AAOS_NOTION_TOKEN, and -- while AAOS is frozen --
+      AAOS_UNFREEZE=1. The generic NOTION_TOKEN is never read, so an
+      ambient token can no longer turn a bare invocation into egress.
+    * Free-text cells (task_id, title) are replaced by a truncated sha256
+      ("sha256:<12 hex>") in every payload, dry-run or live: they may carry
+      a confidential deal identifier (Hard Invariant 3) and there is no
+      roster screen here. There is no verbatim mode.
 
 CLI:
     python tools/publish-notion.py [--project ora-ops] [--in <path>]
-                                    [--parent-page-id <id>] [--dry-run]
-                                    [--now <iso>]
+                                    [--parent-page-id <id>]
+                                    [--dry-run | --live] [--now <iso>]
 
 Env:
-    NOTION_TOKEN   -- Notion internal integration token (required unless
-                      --dry-run; .strip()'d per the trailing-newline-secret
+    AAOS_NOTION_TOKEN -- Notion internal integration token (required only
+                      with --live; .strip()'d per the trailing-newline-secret
                       gotcha that produced an InvalidHeader 500 in
-                      ora-cowork-watchdog on 2026-06-11 -- same failure
-                      mode, same fix, applied here preemptively)
+                      ora-cowork-watchdog on 2026-06-11)
+    AAOS_UNFREEZE  -- must be exactly "1" for --live while ADR-0007 stands
 
 Exit codes:
-    0   published successfully, or --dry-run printed the request body
-        without sending it
+    0   published successfully, or (default / --dry-run) printed the
+        request body without sending it
     1   Notion API call failed (non-2xx response or network error) --
         the publish itself was attempted and did not succeed
-    2   usage error (payload file missing/malformed, NOTION_TOKEN unset
-        and --dry-run not given, --parent-page-id malformed)
+    2   usage error (payload file missing/malformed, --live while frozen,
+        --live without AAOS_NOTION_TOKEN, --parent-page-id malformed)
 """
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import sys
 import urllib.error
@@ -74,7 +85,11 @@ NOTION_VERSION = "2022-06-28"
 DEFAULT_PARENT_PAGE_ID = "32b6ecd8-9e59-81f2-b329-df3fd0e25062"
 
 ROW_COLUMNS = ("task_id", "title", "state", "owner_agent", "priority", "heartbeat_status")
-COLUMN_HEADERS = ("Task ID", "Title", "State", "Owner", "Priority", "Heartbeat")
+COLUMN_HEADERS = ("Task ID (sha256)", "Title (sha256)", "State", "Owner", "Priority", "Heartbeat")
+# Free text that may name a confidential deal: never published verbatim (ADR-0007 addendum).
+# The other columns are schema-bound (state/heartbeat enums, registry agent ids, 1-3 priority).
+HASHED_COLUMNS = frozenset({"task_id", "title"})
+TOKEN_ENV = "AAOS_NOTION_TOKEN"
 
 
 class PublishError(aaos.AaosError):
@@ -96,6 +111,14 @@ def _normalize_page_id(raw: str) -> str:
 def _cell(value) -> list[dict]:
     text = "" if value is None else str(value)
     return [{"type": "text", "text": {"content": text}}]
+
+
+def _redact(value) -> str | None:
+    """Free-text cell -> "sha256:<first 12 hex>" (stable, so rows correlate across pages without
+    disclosing the text). None/empty stays empty."""
+    if value is None or value == "":
+        return None
+    return "sha256:" + hashlib.sha256(str(value).encode("utf-8")).hexdigest()[:12]
 
 
 def _table_row(values) -> dict:
@@ -134,7 +157,9 @@ def build_notion_page_payload(payload: dict, project: str, parent_page_id: str, 
 
     table_rows = [_table_row(COLUMN_HEADERS)]
     for row in rows:
-        table_rows.append(_table_row(row.get(col) for col in ROW_COLUMNS))
+        table_rows.append(_table_row(
+            _redact(row.get(col)) if col in HASHED_COLUMNS else row.get(col) for col in ROW_COLUMNS
+        ))
 
     children = [
         {
@@ -170,14 +195,16 @@ def publish(
     project: str,
     parent_page_id: str,
     token: str | None,
-    dry_run: bool,
+    live: bool = False,
     now_iso: str,
 ) -> dict:
     """Read the projection payload, build the Notion request body, and
-    (unless dry_run) POST it. Returns the request body in all cases so
-    --dry-run callers can print it. Raises aaos.UsageError for anything
-    wrong before the network call, PublishError for anything wrong during
-    or after it."""
+    (only if live) POST it. Returns the request body in all cases so
+    dry-run callers can print it. Raises aaos.UsageError for anything
+    wrong before the network call -- including live=True while AAOS is
+    frozen or without a token -- and PublishError for anything wrong
+    during or after it. The freeze gate lives here, not only in main(),
+    so a programmatic caller is refused too."""
     if not payload_path.exists():
         raise aaos.UsageError(
             f"projection payload not found: {payload_path} "
@@ -190,11 +217,16 @@ def publish(
 
     body = build_notion_page_payload(payload, project, parent_page_id, now_iso)
 
-    if dry_run:
+    if not live:
         return body
 
+    if not aaos.unfreeze_enabled():
+        raise aaos.UsageError(
+            "AAOS is FROZEN (docs/adr/0007-freeze.md): --live publishing to Notion is refused. "
+            f"Only a revival ADR may set {aaos.UNFREEZE_ENV}=1; dry-run (the default) still works."
+        )
     if not token:
-        raise aaos.UsageError("NOTION_TOKEN is required (unset) unless --dry-run is given")
+        raise aaos.UsageError(f"{TOKEN_ENV} is required (unset) for --live; NOTION_TOKEN is not read")
 
     request = urllib.request.Request(
         NOTION_API,
@@ -238,9 +270,16 @@ def build_arg_parser() -> argparse.ArgumentParser:
         "--seam-root", default=None,
         help="Seam root override, used only to derive the default --in path.",
     )
-    parser.add_argument(
+    mode = parser.add_mutually_exclusive_group()
+    mode.add_argument(
         "--dry-run", action="store_true",
-        help="Build and print the Notion request body without sending it (no NOTION_TOKEN needed).",
+        help="Build and print the Notion request body without sending it. This is the default; "
+        "the flag is kept for compatibility.",
+    )
+    mode.add_argument(
+        "--live", action="store_true",
+        help=f"Actually POST to Notion. Requires {TOKEN_ENV} and, while AAOS is frozen (ADR-0007), "
+        "AAOS_UNFREEZE=1.",
     )
     parser.add_argument(
         "--now", default=None,
@@ -276,7 +315,8 @@ def main(argv=None) -> int:
         print(f"USAGE ERROR: {exc}", file=sys.stderr)
         return 2
 
-    token = os.environ.get("NOTION_TOKEN", "").strip() or None
+    # AAOS-specific variable only: an ambient generic NOTION_TOKEN must never enable egress.
+    token = (os.environ.get(TOKEN_ENV, "").strip() or None) if args.live else None
 
     try:
         body = publish(
@@ -284,7 +324,7 @@ def main(argv=None) -> int:
             project=args.project,
             parent_page_id=parent_page_id,
             token=token,
-            dry_run=args.dry_run,
+            live=args.live,
             now_iso=now_iso,
         )
     except aaos.UsageError as exc:
@@ -294,7 +334,7 @@ def main(argv=None) -> int:
         print(f"PUBLISH FAILED: {exc}", file=sys.stderr)
         return 1
 
-    if args.dry_run:
+    if not args.live:
         print(json.dumps(body, indent=2, ensure_ascii=False))
     else:
         print(f"PUBLISHED: Ops Hub child page under {parent_page_id} ({args.project})")
