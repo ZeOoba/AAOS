@@ -224,6 +224,8 @@ def main(argv=None) -> int:
 
     try:
         seam_root = aaos.seam_root(args.seam_root)
+    except aaos.FrozenSeamError:
+        raise  # freeze_exit reports it (exit 2, FROZEN), not as "bad --seam-root"
     except Exception as exc:
         print(f"USAGE ERROR: bad --seam-root: {exc}", file=sys.stderr)
         return 2

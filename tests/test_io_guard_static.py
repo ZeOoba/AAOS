@@ -20,6 +20,7 @@ lexically; no tool uses Path.replace(), and os.replace is matched.
 """
 from __future__ import annotations
 
+import ast
 import io
 import re
 import sys
@@ -34,9 +35,13 @@ END = "# <<< GUARDED I/O PRIMITIVES"
 
 FORBIDDEN = [
     re.compile(r"\bos\.(replace|rename|renames|link|symlink|unlink|remove|rmdir|removedirs|makedirs|mkdir|"
-               r"open|listdir|scandir|walk|truncate|chmod|utime)\s*\("),
+               r"open|listdir|scandir|walk|truncate|chmod|utime|copy_file_range|sendfile|system|popen|startfile|"
+               r"exec\w*|spawn\w*|posix_spawn\w*)\s*\("),
     re.compile(r"\bshutil\.\w+\s*\("),
-    re.compile(r"\b(io|codecs|gzip|tempfile)\.\w*open\w*\s*\("),
+    re.compile(r"\b(io|codecs|gzip|bz2|lzma)\.\w*open\w*\s*\("),
+    re.compile(r"\btempfile\.\w+\s*\("),
+    re.compile(r"\b(zipfile|sqlite3|fileinput|importlib)\.\w+"),
+    re.compile(r"\.chmod\s*\("),
     re.compile(r"(?<![\w.])open\s*\("),
     re.compile(r"\.(open|read_text|write_text|read_bytes|write_bytes|iterdir|glob|rglob|mkdir|rmdir|"
                r"unlink|rename|touch|symlink_to|hardlink_to|link_to|walk)\s*\("),
@@ -44,6 +49,75 @@ FORBIDDEN = [
 
 # Raw call sites allowed OUTSIDE the primitives block: (file name, stripped code line). Keep empty.
 ALLOWED_OUTSIDE_BLOCK: set[tuple[str, str]] = set()
+
+# ---- AST pass: shapes a line regex cannot see (aliased imports, rebinding, dynamic lookup) ----
+# `from <module> import ...` is forbidden for these modules outside the primitives block ...
+IMPORTFROM_FORBIDDEN = {"os", "shutil", "io", "builtins", "pathlib", "tempfile", "zipfile", "sqlite3",
+                        "fileinput", "subprocess", "codecs", "importlib"}
+# ... except these exact names (Path's methods are covered by the regex pass).
+IMPORTFROM_ALLOWED = {("pathlib", "Path")}
+# Modules that may not be imported at all anywhere in tools/.
+IMPORT_BANNED = {"zipfile", "sqlite3", "fileinput", "importlib"}
+# Modules that may not be imported under an alias (`import os as o` would evade the regex pass).
+NO_ALIAS = {"os", "shutil", "io", "builtins", "pathlib", "tempfile", "subprocess", "codecs"}
+GETATTR_TARGETS = {"os", "shutil", "io", "builtins", "pathlib", "tempfile", "subprocess", "sys"}
+# subprocess is allowed only in these files, only via subprocess.run, and only to run git.
+SUBPROCESS_FILES = {"publish-contracts.py", "check-contract-drift.py"}
+OS_PROCESS_FUNCS = re.compile(r"^(system|popen|startfile|exec\w*|spawn\w*|posix_spawn\w*|fork\w*)$")
+
+
+def _ast_violations(path: Path, block: tuple[int, int] | None = None) -> list[str]:
+    tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
+    name = path.name
+    out = []
+
+    def bad(node, why):
+        if block and block[0] < getattr(node, "lineno", 0) < block[1]:
+            return
+        out.append(f"{name}:{node.lineno}: {why}")
+
+    call_funcs = {id(n.func) for n in ast.walk(tree) if isinstance(n, ast.Call)}
+    for node in ast.walk(tree):
+        if isinstance(node, ast.ImportFrom) and node.module:
+            root = node.module.split(".")[0]
+            if root in IMPORT_BANNED:
+                out.append(f"{name}:{node.lineno}: import of banned module {node.module}")
+            elif root in IMPORTFROM_FORBIDDEN:
+                for alias in node.names:
+                    if (node.module, alias.name) not in IMPORTFROM_ALLOWED or alias.asname:
+                        bad(node, f"from {node.module} import {alias.name}")
+        elif isinstance(node, ast.Import):
+            for alias in node.names:
+                root = alias.name.split(".")[0]
+                if root in IMPORT_BANNED:
+                    out.append(f"{name}:{node.lineno}: import of banned module {alias.name}")
+                if root in NO_ALIAS and alias.asname:
+                    bad(node, f"import {alias.name} as {alias.asname}")
+                if root == "subprocess" and name not in SUBPROCESS_FILES:
+                    bad(node, "import subprocess outside the allowlisted git callers")
+        elif isinstance(node, ast.Name) and node.id == "open":
+            if isinstance(node.ctx, (ast.Store, ast.Del)) or id(node) not in call_funcs:
+                bad(node, "open referenced other than as a direct call (rebinding/aliasing)")
+        elif isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)) and node.name == "open":
+            bad(node, "definition shadowing open")
+        elif isinstance(node, ast.Call):
+            f = node.func
+            if isinstance(f, ast.Name) and f.id == "__import__":
+                bad(node, "__import__()")
+            if (isinstance(f, ast.Name) and f.id == "getattr" and node.args
+                    and isinstance(node.args[0], ast.Name) and node.args[0].id in GETATTR_TARGETS):
+                bad(node, f"getattr({node.args[0].id}, ...)")
+            if isinstance(f, ast.Attribute) and isinstance(f.value, ast.Name):
+                mod, attr = f.value.id, f.attr
+                if mod == "os" and OS_PROCESS_FUNCS.match(attr):
+                    bad(node, f"os.{attr}()")
+                if mod == "subprocess":
+                    first = node.args[0] if node.args else None
+                    is_git = (attr == "run" and isinstance(first, (ast.List, ast.Tuple)) and first.elts
+                              and isinstance(first.elts[0], ast.Constant) and first.elts[0].value == "git")
+                    if not (name in SUBPROCESS_FILES and is_git):
+                        bad(node, f"subprocess.{attr}() other than an allowlisted git call")
+    return out
 
 
 def _code_lines(path: Path) -> list[str]:
@@ -94,6 +168,7 @@ class GuardedIoStaticTests(unittest.TestCase):
         violations = []
         for f in sorted(TOOLS.glob("*.py")):
             violations += _violations(f, span if f == COMMON else None)
+            violations += _ast_violations(f, span if f == COMMON else None)
         self.assertEqual(violations, [], "raw filesystem calls must go through the guarded primitives:\n"
                          + "\n".join(violations))
 
@@ -118,19 +193,40 @@ class GuardedIoStaticTests(unittest.TestCase):
             self.assertRegex(src, r"@_?aaos\.freeze_exit\ndef main\(", f.name)
 
     def test_scanner_flags_raw_calls_and_ignores_strings(self):
-        """Self-test: the scanner must catch each forbidden shape and skip comments/docstrings."""
+        """Self-test: the scanner (regex + AST passes) must catch each forbidden shape and skip
+        comments/docstrings and the allowed forms."""
         import tempfile
         bad = ['os.replace(a, b)', 'p.read_text(encoding="utf-8")', 'open(p)', 'd.iterdir()',
                'shutil.move(a, b)', 'os.makedirs(d, exist_ok=True)', 'x.rglob("*")', 'p.unlink()',
-               'p.write_bytes(b"")', 'os.listdir(d)', 'os.scandir(d)', 'p.open("rb")']
+               'p.write_bytes(b"")', 'os.listdir(d)', 'os.scandir(d)', 'p.open("rb")',
+               # closing-review F2 shapes
+               'from os import replace', 'from os import replace as mv', 'from shutil import copyfile',
+               'o = open\no(p)', 'getattr(os, "replace")(a, b)', '__import__("os")',
+               'tempfile.mkstemp(dir=d)', 'tempfile.NamedTemporaryFile(dir=d)',
+               'import zipfile', 'zipfile.ZipFile(p)', 'import sqlite3', 'sqlite3.connect(p)',
+               'import fileinput', 'fileinput.input(p, inplace=True)', 'p.chmod(0o600)',
+               'os.copy_file_range(a, b, 1)', 'os.system("x")', 'subprocess.run(["rm", "x"])',
+               'subprocess.Popen(["git", "status"])', 'import subprocess',
+               'import os as o', 'from io import open', 'from builtins import open',
+               'from pathlib import PurePath', 'from pathlib import Path as P', 'def open(p): pass',
+               'import importlib', 'os.popen("x")', 'getattr(shutil, "move")']
         ok = ['"os.replace(a, b)"', '# open(p)', 'aaos.g_read_text(p)', 'g_open(p)', 's.replace("a", "b")',
-              'aaos.g_iterdir(d)']
+              'aaos.g_iterdir(d)', 'from pathlib import Path', 'getattr(args, "live")', 'import os',
+              'os.path.join(a, b)']
         with tempfile.TemporaryDirectory() as d:
             for snippet, expect in [(b, True) for b in bad] + [(o, False) for o in ok]:
                 f = Path(d) / "snippet.py"
                 f.write_text(f"x = 1\n{snippet}\n", encoding="utf-8")
                 with self.subTest(snippet=snippet):
-                    self.assertEqual(bool(_violations(f)), expect)
+                    self.assertEqual(bool(_violations(f) + _ast_violations(f)), expect)
+            # The git allowlist is per file: the same git call passes only in an allowlisted file.
+            git = 'import subprocess\nsubprocess.run(["git", "rev-parse", "HEAD"], capture_output=True)\n'
+            allowed = Path(d) / "publish-contracts.py"
+            allowed.write_text(git, encoding="utf-8")
+            self.assertEqual(_violations(allowed) + _ast_violations(allowed), [])
+            other = Path(d) / "create-task.py"
+            other.write_text(git, encoding="utf-8")
+            self.assertTrue(_ast_violations(other))
 
 
 if __name__ == "__main__":

@@ -303,6 +303,132 @@ class FreezeGuardCliTests(_DecoyCase):
         self.assertTrue(out.exists())
 
 
+class FrozenErrorPropagationTests(_DecoyCase):
+    """Closing review F3: no handler may swallow FrozenSeamError (a UsageError subclass) and turn a
+    freeze refusal into "unreadable"/"gone"/"best-effort" behaviour. One test per site."""
+
+    def _frozen(self, *a, **k):
+        raise aaos.FrozenSeamError("AAOS is FROZEN (docs/adr/0007-freeze.md): synthetic refusal")
+
+    def test_load_heartbeat_reraises(self):
+        hb = self.other / "heartbeat.json"
+        hb.write_text("{}", encoding="utf-8")
+        with mock.patch.object(aaos, "load_json", side_effect=self._frozen):
+            with self.assertRaises(aaos.FrozenSeamError):
+                aaos.load_heartbeat(root=str(self.other))
+
+    def test_load_heartbeat_still_tolerates_corrupt(self):
+        hb = self.other / "heartbeat.json"
+        hb.write_text("{not json", encoding="utf-8")
+        err = io.StringIO()
+        with redirect_stderr(err):
+            self.assertIsNone(aaos.load_heartbeat(root=str(self.other)))
+
+    def test_archive_lock_if_unchanged_reraises_on_first_read(self):
+        lock = self.other / "projects" / "ora-ops" / "locks" / "t-synthetic.lock"
+        lock.parent.mkdir(parents=True)
+        lock.write_text("{}", encoding="utf-8")
+        with mock.patch.object(aaos, "load_json", side_effect=self._frozen):
+            with self.assertRaises(aaos.FrozenSeamError):
+                aaos.archive_lock_if_unchanged(lock, {})
+        self.assertTrue(lock.exists())
+
+    def test_lock_restore_failed_escalation_reraises(self):
+        locks = self.other / "projects" / "ora-ops" / "locks"
+        (locks / "_archive").mkdir(parents=True)
+        archived = locks / "_archive" / "t-synthetic.x.lock"
+        archived.write_text("{}", encoding="utf-8")
+        lock = locks / "t-synthetic.lock"
+        err = io.StringIO()
+        with mock.patch.object(aaos, "g_link", side_effect=OSError("synthetic")), \
+             mock.patch.object(aaos, "g_rename", side_effect=OSError("synthetic")), \
+             mock.patch.object(aaos, "emit_event", side_effect=self._frozen), redirect_stderr(err):
+            with self.assertRaises(aaos.FrozenSeamError):
+                aaos._restore_archived_lock(archived, lock)
+
+    def test_lock_restore_failed_escalation_other_errors_stay_best_effort(self):
+        locks = self.other / "projects" / "ora-ops" / "locks"
+        (locks / "_archive").mkdir(parents=True)
+        archived = locks / "_archive" / "t-synthetic.x.lock"
+        archived.write_text("{}", encoding="utf-8")
+        err = io.StringIO()
+        with mock.patch.object(aaos, "g_link", side_effect=OSError("synthetic")), \
+             mock.patch.object(aaos, "g_rename", side_effect=OSError("synthetic")), \
+             mock.patch.object(aaos, "emit_event", side_effect=RuntimeError("synthetic")), redirect_stderr(err):
+            self.assertFalse(aaos._restore_archived_lock(archived, locks / "t-synthetic.lock"))
+
+    def test_derive_heartbeat_registry_load_reraises(self):
+        module = _tool_loader.load_tool("derive-heartbeat.py")
+        sig = self.tmp / "signals.json"
+        sig.write_text('{"agents": []}', encoding="utf-8")
+        out, err = io.StringIO(), io.StringIO()
+        with mock.patch.object(aaos, "load_registry", side_effect=self._frozen), \
+             redirect_stdout(out), redirect_stderr(err):
+            code = module.main(["--signals", str(sig), "--out", str(self.other / "hb.json"),
+                                "--now", "2026-11-12T00:00:00+00:00"])
+        self.assertEqual(code, 2)
+        self.assertIn("FROZEN", err.getvalue())  # via freeze_exit, not the generic registry message
+        self.assertNotIn("could not load agent registry", out.getvalue() + err.getvalue())
+
+    def test_publish_contracts_seam_root_reraises(self):
+        module = _tool_loader.load_tool("publish-contracts.py")
+        out, err = io.StringIO(), io.StringIO()
+        with redirect_stdout(out), redirect_stderr(err):
+            code = module.main(["--seam-root", str(self.decoy), "--source-commit", "0" * 40])
+        self.assertEqual(code, 2)
+        self.assertIn("FROZEN", err.getvalue())
+        self.assertNotIn("bad --seam-root", err.getvalue())
+
+
+class GuardHardeningTests(_DecoyCase):
+    """Closing review F1: (a) compare against the live root's resolved spelling too, (b) use
+    os.fspath, (c) fail closed when resolution raises."""
+
+    def test_a_live_root_given_through_an_alias_is_matched_by_its_real_spelling(self):
+        real = self.tmp / "real-root"
+        (real / "AAOS" / "projects").mkdir(parents=True)
+        alias = self.tmp / "alias-root"
+        if not _make_dir_link(alias, real):
+            self.skipTest("cannot create a symlink or junction on this host")
+        self.addCleanup(lambda: os.rmdir(str(alias)) if os.path.lexists(str(alias)) else None)
+        with mock.patch.object(aaos, "LIVE_SEAM_ROOT", str(alias / "AAOS")):
+            for p in (real / "AAOS", real / "AAOS" / "projects", real / "AAOS" / "no-such" / "x.json"):
+                with self.subTest(p=str(p)):
+                    with self.assertRaises(aaos.FrozenSeamError):
+                        aaos.refuse_frozen_live_path(str(p), "--out")
+            aaos.refuse_frozen_live_path(str(self.other), "--out")  # unrelated path still allowed
+
+    def test_b_pathlike_is_screened_by_its_fspath_not_its_str(self):
+        decoy = str(self.decoy)
+
+        class Sneaky:
+            def __fspath__(self):
+                return decoy
+
+            def __str__(self):
+                return "C:/not/the/seam" if os.name == "nt" else "/not/the/seam"
+
+        with self.assertRaises(aaos.FrozenSeamError):
+            aaos.refuse_frozen_live_path(Sneaky(), "--out")
+        with self.assertRaises(aaos.FrozenSeamError):
+            aaos.seam_root(Sneaky())
+
+    def test_c_resolution_failure_fails_closed(self):
+        with mock.patch.object(aaos.os.path, "realpath", side_effect=OSError("synthetic")):
+            with self.assertRaises(aaos.FrozenSeamError) as ctx:
+                aaos.refuse_frozen_live_path(str(self.other / "x.json"), "--out")
+        self.assertIn("could not be resolved", str(ctx.exception))
+
+    def test_c_unresolvable_path_value_fails_closed(self):
+        with self.assertRaises(aaos.FrozenSeamError):
+            aaos.refuse_frozen_live_path(str(self.other) + "\x00bad", "--out")
+
+    def test_c_unfrozen_skips_resolution_entirely(self):
+        with mock.patch.dict(os.environ, {"AAOS_UNFREEZE": "1"}), \
+             mock.patch.object(aaos.os.path, "realpath", side_effect=OSError("synthetic")):
+            aaos.refuse_frozen_live_path(str(self.other / "x.json"), "--out")
+
+
 @unittest.skipUnless(os.name == "nt", "directory junctions are Windows-only")
 class NestedJunctionTests(_DecoyCase):
     """Round-2 review C1: a root that is NOT the live seam, but with a junction BELOW it that

@@ -230,7 +230,8 @@ def _seam_key(path) -> str:
     slash. On Windows additionally: each component loses trailing dots/spaces and any NTFS
     stream suffix (":$INDEX_ALLOCATION", ":name:$DATA"), which Win32 ignores when opening the
     path, and the key is case-folded."""
-    s = str(path).replace("\\", "/")
+    s = path if isinstance(path, str) else os.fsdecode(path)  # PathLike/bytes: its fspath, not str()
+    s = s.replace("\\", "/")
     low = s.lower()
     if low.startswith(("//?/unc/", "//./unc/")):
         s = "//" + s[8:]
@@ -252,6 +253,29 @@ def _seam_key(path) -> str:
 
 def _under(key: str, root_key: str) -> bool:
     return key == root_key or key.startswith(root_key.rstrip("/") + "/")
+
+
+_RESOLVED_LIVE_KEYS: dict = {}
+
+
+def _resolved_live_key(live: str) -> str | None:
+    """Comparison key for the live root's RESOLVED spelling (closing review F1a), so a candidate
+    whose realpath is the canonical form matches even when LIVE_SEAM_ROOT is spelled through an
+    alias (junction, 8.3 name, subst drive) of one of its ancestors.
+
+    Computed lazily, on the first frozen check that reaches it, and cached per LIVE_SEAM_ROOT
+    value -- never at import time. Only the PARENT of the live root is resolved and the final
+    component re-appended lexically, so this opens a metadata handle on the parent folder
+    (Claude_Workspace on the operating machine) but never on the live seam folder itself. If the
+    parent cannot be resolved, None: the lexical keys still apply."""
+    if live not in _RESOLVED_LIVE_KEYS:
+        try:
+            absolute = os.path.abspath(live)
+            parent, leaf = os.path.split(absolute.rstrip("\\/"))
+            _RESOLVED_LIVE_KEYS[live] = _seam_key(os.path.join(os.path.realpath(parent), leaf))
+        except (OSError, ValueError):
+            _RESOLVED_LIVE_KEYS[live] = None
+    return _RESOLVED_LIVE_KEYS[live]
 
 
 def _frozen_error(candidate, label: str, why: str) -> UsageError:
@@ -279,13 +303,18 @@ def refuse_frozen_live_path(candidate, label: str) -> None:
          symlink, 8.3 short name, subst drive). realpath DOES open a read-only handle on the
          candidate and, when the candidate is an alias, on its target -- which may be the live
          seam. That is a metadata open, never a write, and it only happens for a spelling that
-         step 1 could not recognise.
+         step 1 could not recognise. The resolved path is compared against the live root's
+         literal spellings AND its resolved spelling (_resolved_live_key). If resolution raises,
+         the path is refused: it cannot be shown to lie outside the live seam (fail closed).
+
+    The candidate is read through os.fspath/os.fsdecode, never str(): a PathLike whose __str__
+    differs from its __fspath__ is screened by the path the OS will actually open.
     """
     if unfreeze_enabled():
         return
     live = LIVE_SEAM_ROOT
     live_keys = {_seam_key(live), _seam_key(os.path.abspath(live))}
-    raw = str(candidate)
+    raw = candidate if isinstance(candidate, str) else os.fsdecode(candidate)
 
     def hit(key: str) -> bool:
         return any(_under(key, lk) for lk in live_keys)
@@ -294,12 +323,19 @@ def refuse_frozen_live_path(candidate, label: str) -> None:
         raise _frozen_error(candidate, label, "it is, or is under, the live seam")
     if raw.replace("\\", "/").startswith("//"):
         raise _frozen_error(candidate, label, "UNC and device-namespace paths are refused while frozen")
+    if "\x00" in raw:  # no OS path contains NUL; some Python versions resolve it without raising
+        raise _frozen_error(candidate, label, "it contains a NUL character and cannot be resolved")
     try:
-        if hit(_seam_key(os.path.abspath(raw))):
-            raise _frozen_error(candidate, label, "it is, or is under, the live seam")
+        absolute = os.path.abspath(raw)
         resolved = os.path.realpath(raw)
-    except (OSError, ValueError):
-        return
+    except (OSError, ValueError) as exc:
+        raise _frozen_error(candidate, label, f"it could not be resolved ({exc}), so it cannot be shown "
+                            "to lie outside the live seam") from exc
+    if hit(_seam_key(absolute)):
+        raise _frozen_error(candidate, label, "it is, or is under, the live seam")
+    resolved_live = _resolved_live_key(live)
+    if resolved_live:
+        live_keys.add(resolved_live)
     if hit(_seam_key(resolved)):
         raise _frozen_error(candidate, label, "it resolves (via an alias) to, or under, the live seam")
 
@@ -651,6 +687,8 @@ def load_heartbeat(*, root: str | None = None) -> dict | None:
         return None
     try:
         return load_json(path)
+    except FrozenSeamError:
+        raise
     except (UsageError, CorruptStateError) as exc:
         print(
             f"WARNING: heartbeat.json exists but is unreadable/corrupt "
@@ -898,6 +936,8 @@ def archive_lock_if_unchanged(lock_file: Path | str, expected: dict, *, now: dat
     lock_file = Path(lock_file)
     try:
         current = load_json(lock_file)
+    except FrozenSeamError:
+        raise
     except (UsageError, CorruptStateError):
         return None  # gone or unreadable: nothing of ours to archive
     if current != expected:
@@ -955,6 +995,8 @@ def _restore_archived_lock(archived: Path, lock_file: Path, *, now: datetime | N
                 detail=f"LockRestoreFailed: live lock left at {archived.name}"[:200],
                 now=now, root=str(project_dir_.parent.parent),
             )
+        except FrozenSeamError:
+            raise
         except Exception as emit_exc:  # best-effort: never mask the caller's own path
             print(f"WARNING: could not emit LockRestoreFailed escalation: {emit_exc}", file=sys.stderr)
         return False

@@ -297,6 +297,8 @@ def main(argv=None) -> int:
 
     try:
         registry = aaos.load_registry()
+    except aaos.FrozenSeamError:
+        raise  # freeze_exit reports it (exit 2, FROZEN), not as a generic registry failure
     except Exception as exc:  # noqa: BLE001 -- any registry-load failure is a usage error
         print(f"USAGE ERROR: could not load agent registry: {exc}")
         return 2
