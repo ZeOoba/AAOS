@@ -105,7 +105,7 @@ def main(argv=None) -> int:
             # whenever a prior failure had left events spooled.
             aaos.drain_event_spool(args.project, root=args.seam_root, now=resolved_now)
 
-        locks_dir = aaos.project_dir(args.project, root=args.seam_root) / "locks"
+        locks_dir = aaos.guard_path(aaos.project_dir(args.project, root=args.seam_root) / "locks", "locks dir")
         if not locks_dir.is_dir():
             print("no locks directory; nothing to sweep")
             return 0

@@ -303,5 +303,129 @@ class FreezeGuardCliTests(_DecoyCase):
         self.assertTrue(out.exists())
 
 
+@unittest.skipUnless(os.name == "nt", "directory junctions are Windows-only")
+class NestedJunctionTests(_DecoyCase):
+    """Round-2 review C1: a root that is NOT the live seam, but with a junction BELOW it that
+    leads into the live seam (fake/projects -> live/projects, fake/contracts -> live/contracts,
+    fake/projects/ora-ops/tasks -> live tasks). seam_root(fake) passes; every leaf path the
+    builders return, and every directory a tool derives itself, must still be refused."""
+
+    NOW = ("--now", "2026-11-12T00:00:00+00:00")
+
+    def setUp(self):
+        super().setUp()
+        for sub in ("handoffs", "locks/_archive", "events"):
+            (self.decoy / "projects" / "ora-ops" / sub).mkdir(parents=True, exist_ok=True)
+        (self.decoy / "contracts").mkdir()
+        self.fake = self.tmp / "fake-seam"
+        self.fake.mkdir()
+        self.baseline = self._snapshot()
+
+    def _junction(self, link: Path, target: Path):
+        link.parent.mkdir(parents=True, exist_ok=True)
+        proc = subprocess.run(["cmd", "/c", "mklink", "/J", str(link), str(target)], capture_output=True)
+        if proc.returncode != 0 or not link.exists():
+            self.skipTest("cannot create a junction on this host")
+        self.addCleanup(lambda: os.rmdir(str(link)) if os.path.lexists(str(link)) else None)
+
+    def _refused(self, fn):
+        with self.assertRaises(aaos.UsageError) as ctx:
+            fn()
+        self.assertIn("FROZEN", str(ctx.exception))
+
+    def _run(self, name, *argv):
+        module = _tool_loader.load_tool(name)
+        out, err = io.StringIO(), io.StringIO()
+        with redirect_stderr(err), redirect_stdout(out), mock.patch("urllib.request.urlopen") as net:
+            code = module.main(list(argv))
+        net.assert_not_called()
+        return code, out.getvalue() + err.getvalue()
+
+    def _assert_cli_refused(self, name, *argv):
+        code, output = self._run(name, *argv)
+        self.assertEqual(code, 2, output)
+        self.assertIn("FROZEN", output)
+        self.assertEqual(self._snapshot(), self.baseline, "nothing may be written under the live seam")
+
+    def test_root_itself_is_allowed(self):
+        self._junction(self.fake / "projects", self.decoy / "projects")
+        self.assertEqual(aaos.seam_root(str(self.fake)), Path(str(self.fake)))
+
+    def test_every_builder_refuses_a_junctioned_projects_dir(self):
+        self._junction(self.fake / "projects", self.decoy / "projects")
+        r = str(self.fake)
+        builders = [
+            lambda: aaos.project_dir("ora-ops", root=r),
+            lambda: aaos.task_path("t-synthetic", "ora-ops", root=r),
+            lambda: aaos.handoff_path("h-synthetic", "ora-ops", root=r),
+            lambda: aaos.lock_path("t-synthetic", "ora-ops", root=r),
+            lambda: aaos.lock_archive_dir("ora-ops", root=r),
+            lambda: aaos.events_log_path("ora-ops", root=r),
+            lambda: aaos.event_spool_dir("ora-ops", root=r),
+            lambda: aaos._drain_lock_path("ora-ops", root=r),
+            lambda: aaos._events_archive_dir("ora-ops", root=r),
+            lambda: aaos._pending_drained_dir("ora-ops", root=r),
+            lambda: aaos._pending_corrupt_dir("ora-ops", root=r),
+        ]
+        for i, fn in enumerate(builders):
+            with self.subTest(builder=i):
+                self._refused(fn)
+
+    def test_deeper_junction_at_events_is_refused(self):
+        real = self.fake / "projects" / "ora-ops"
+        real.mkdir(parents=True)
+        self._junction(real / "events", self.decoy / "projects" / "ora-ops" / "events")
+        r = str(self.fake)
+        self.assertEqual(aaos.project_dir("ora-ops", root=r), real)
+        self._refused(lambda: aaos.events_log_path("ora-ops", root=r))
+        self._refused(lambda: aaos._pending_drained_dir("ora-ops", root=r))
+
+    def test_heartbeat_path_is_screened_as_a_leaf(self):
+        """heartbeat.json sits directly under the root, so only a file-level alias could redirect
+        it; prove the builder screens its leaf by planting a directory junction AT the leaf."""
+        self._junction(self.fake / "heartbeat.json", self.decoy)
+        self._refused(lambda: aaos.heartbeat_path(root=str(self.fake)))
+
+    def test_create_task_through_junctioned_projects_is_refused(self):
+        self._junction(self.fake / "projects", self.decoy / "projects")
+        self._assert_cli_refused("create-task.py", "--id", "t-synthetic-junction", "--title", "synthetic",
+                                 "--accept", "x", "--seam-root", str(self.fake), *self.NOW)
+
+    def test_emit_event_through_junctioned_events_is_refused(self):
+        real = self.fake / "projects" / "ora-ops"
+        real.mkdir(parents=True)
+        self._junction(real / "events", self.decoy / "projects" / "ora-ops" / "events")
+        self._assert_cli_refused("emit-event.py", "--type", "TaskCreated", "--actor", "claude-code",
+                                 "--task", "t-synthetic", "--seam-root", str(self.fake), *self.NOW)
+
+    def test_project_notion_through_junctioned_tasks_is_refused(self):
+        real = self.fake / "projects" / "ora-ops"
+        real.mkdir(parents=True)
+        self._junction(real / "tasks", self.decoy / "projects" / "ora-ops" / "tasks")
+        self._assert_cli_refused("project-notion.py", "--seam-root", str(self.fake),
+                                 "--out", str(self.tmp / "pn.json"), *self.NOW)
+        self.assertFalse((self.tmp / "pn.json").exists())
+
+    def test_expire_leases_through_junctioned_locks_is_refused(self):
+        real = self.fake / "projects" / "ora-ops"
+        real.mkdir(parents=True)
+        self._junction(real / "locks", self.decoy / "projects" / "ora-ops" / "locks")
+        self._assert_cli_refused("expire-leases.py", "--dry-run", "--seam-root", str(self.fake), *self.NOW)
+
+    def test_publish_contracts_through_junctioned_contracts_is_refused(self):
+        self._junction(self.fake / "contracts", self.decoy / "contracts")
+        self._assert_cli_refused("publish-contracts.py", "--seam-root", str(self.fake),
+                                 "--source-commit", "0" * 40)
+
+    def test_check_contract_drift_through_junctioned_contracts_is_refused(self):
+        self._junction(self.fake / "contracts", self.decoy / "contracts")
+        self._assert_cli_refused("check-contract-drift.py", "--seam-root", str(self.fake),
+                                 "--source-commit", "0" * 40)
+
+    def test_publish_notion_default_in_through_junctioned_projects_is_refused(self):
+        self._junction(self.fake / "projects", self.decoy / "projects")
+        self._assert_cli_refused("publish-notion.py", "--seam-root", str(self.fake), *self.NOW)
+
+
 if __name__ == "__main__":
     unittest.main()

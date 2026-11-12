@@ -116,9 +116,18 @@ class BuildPayloadTests(_EnvCase):
     """Pure builder -- no network, no filesystem."""
 
     def test_title_includes_project_and_timestamp(self):
+        """Known project ids (ora-ops) appear verbatim; any other id is HMAC-tagged (review C4)."""
         body = self._build()
         title = body["properties"]["title"]["title"][0]["text"]["content"]
         self.assertIn("ora-ops", title)
+        self.assertIn(NOW, title)
+
+    def test_unknown_project_is_tagged_in_the_title(self):
+        body = self._build(project="synthetic-deal-alpha")
+        blob = json.dumps(body)
+        self.assertNotIn("synthetic-deal-alpha", blob)
+        title = body["properties"]["title"]["title"][0]["text"]["content"]
+        self.assertIn(_h("synthetic-deal-alpha"), title)
         self.assertIn(NOW, title)
 
     def test_parent_is_the_given_page_id(self):
@@ -280,7 +289,7 @@ class PublishTests(_EnvCase):
         self.urlopen.assert_not_called()
 
     def test_live_refused_without_hash_key(self):
-        for key in (None, "", "short"):
+        for key in (None, "", "short", " " * 20, "\t" + "a" * 15 + "\n", "a b c d e f g h i"):
             with self.subTest(key=key):
                 env = dict(LIVE_ENV)
                 env.pop("AAOS_HASH_KEY")
@@ -291,6 +300,11 @@ class PublishTests(_EnvCase):
                         self._publish(live=True)
                 self.assertIn("AAOS_HASH_KEY", str(ctx.exception))
                 self.urlopen.assert_not_called()
+
+    def test_hash_key_is_stripped(self):
+        """Surrounding whitespace is not key material: " k \n" and "k" tag identically."""
+        with patch.dict(os.environ, {"AAOS_HASH_KEY": "  " + TEST_KEY + "\n"}):
+            self.assertEqual(self._cells(self._publish())[1], _h("Synthetic Parcel Alpha LOI follow-up"))
 
     def test_live_refuses_bad_project(self):
         with patch.dict(os.environ, LIVE_ENV):

@@ -351,58 +351,68 @@ def require_seam_reachable(root: str | None = None) -> Path:
     return resolved
 
 
+def guard_path(path, label: str = "derived seam path") -> Path:
+    """Single choke point for every path derived under a seam root: refuse it while frozen if it
+    is, lies under, or (through a junction/symlink anywhere along it, even below an allowed root
+    and even when the leaf does not exist yet) resolves into the live seam. Returns the path
+    unchanged. Every builder below returns through here, and tools that derive a directory
+    themselves (tasks/, locks/, contracts/) call it too (ADR-0007 addendum 2026-11-12)."""
+    refuse_frozen_live_path(path, label)
+    return Path(path)
+
+
 def project_dir(project_id: str, *, root: str | None = None) -> Path:
     _validate_project_id(project_id)
-    return seam_root(root) / "projects" / project_id
+    return guard_path(seam_root(root) / "projects" / project_id, "project dir")
 
 
 def task_path(task_id, project_id, *, root: str | None = None) -> Path:
     _validate_task_id(task_id)
-    return project_dir(project_id, root=root) / "tasks" / f"{task_id}.json"
+    return guard_path(project_dir(project_id, root=root) / "tasks" / f"{task_id}.json", "task path")
 
 
 def handoff_path(handoff_id, project_id, *, root: str | None = None) -> Path:
     _validate_handoff_id(handoff_id)
-    return project_dir(project_id, root=root) / "handoffs" / f"{handoff_id}.json"
+    return guard_path(project_dir(project_id, root=root) / "handoffs" / f"{handoff_id}.json", "handoff path")
 
 
 def lock_path(task_id, project_id, *, root: str | None = None) -> Path:
     _validate_task_id(task_id)
-    return project_dir(project_id, root=root) / "locks" / f"{task_id}.lock"
+    return guard_path(project_dir(project_id, root=root) / "locks" / f"{task_id}.lock", "lock path")
 
 
 def lock_archive_dir(project_id, *, root: str | None = None) -> Path:
-    return project_dir(project_id, root=root) / "locks" / "_archive"
+    return guard_path(project_dir(project_id, root=root) / "locks" / "_archive", "lock archive dir")
 
 
 def events_log_path(project_id, *, root: str | None = None) -> Path:
-    return project_dir(project_id, root=root) / "events" / "aaos-events.ndjson"
+    return guard_path(project_dir(project_id, root=root) / "events" / "aaos-events.ndjson", "event log")
 
 
 def event_spool_dir(project_id, *, root: str | None = None) -> Path:
     log_path = events_log_path(project_id, root=root)
-    return log_path.parent / (log_path.name + ".pending")
+    return guard_path(log_path.parent / (log_path.name + ".pending"), "event spool dir")
 
 
 def _drain_lock_path(project_id, *, root: str | None = None) -> Path:
     log_path = events_log_path(project_id, root=root)
-    return log_path.parent / (log_path.name + ".drainlock")
+    return guard_path(log_path.parent / (log_path.name + ".drainlock"), "drain lock")
 
 
 def _events_archive_dir(project_id, *, root: str | None = None) -> Path:
-    return events_log_path(project_id, root=root).parent / "_archive"
+    return guard_path(events_log_path(project_id, root=root).parent / "_archive", "event archive dir")
 
 
 def _pending_drained_dir(project_id, *, root: str | None = None) -> Path:
-    return event_spool_dir(project_id, root=root) / "_drained"
+    return guard_path(event_spool_dir(project_id, root=root) / "_drained", "drained spool dir")
 
 
 def _pending_corrupt_dir(project_id, *, root: str | None = None) -> Path:
-    return event_spool_dir(project_id, root=root) / "_corrupt"
+    return guard_path(event_spool_dir(project_id, root=root) / "_corrupt", "corrupt spool dir")
 
 
 def heartbeat_path(*, root: str | None = None) -> Path:
-    return seam_root(root) / "heartbeat.json"
+    return guard_path(seam_root(root) / "heartbeat.json", "heartbeat path")
 
 
 def registry_path() -> Path:
@@ -1849,6 +1859,10 @@ def emit_event(
     errors = validate_obj(event, "event")
     if errors:
         raise EventCommitError(f"event failed schema validation, not committed: {errors}")
+
+    # Freeze screen OUTSIDE the commit try: a refused spool path is a usage
+    # error (exit 2, nothing written), not a failed commit (exit 5).
+    event_spool_dir(project_id, root=root)
 
     # Commit: this write IS the durability guarantee. If it fails, nothing
     # happened and the caller sees EventCommitError (exit 5).

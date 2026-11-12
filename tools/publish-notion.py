@@ -32,7 +32,8 @@ split and publish-contracts.py's plan/execute split):
 
 FAIL-CLOSED DEFAULTS (docs/adr/0007-freeze.md, addendum 2026-11-12):
     * Dry-run is the default. A live POST needs ALL of: --live (live=True),
-      AAOS_NOTION_TOKEN, AAOS_HASH_KEY (>= 16 chars) and -- while AAOS is
+      AAOS_NOTION_TOKEN, AAOS_HASH_KEY (stripped; >= 16 non-whitespace
+      chars) and -- while AAOS is
       frozen -- AAOS_UNFREEZE=1. publish() reads the token and key from the
       environment itself (there is no token parameter), and the generic
       NOTION_TOKEN is never read, so neither an ambient token nor a caller
@@ -42,7 +43,8 @@ FAIL-CLOSED DEFAULTS (docs/adr/0007-freeze.md, addendum 2026-11-12):
       uses an ephemeral random key. owner_agent passes verbatim only if it is
       a registered agent id or "unassigned"; state, heartbeat_status and
       priority only if they are schema values; anything else is tagged too.
-      project must match PROJECT_ID_RE, and generated_at / now must be
+      project must match PROJECT_ID_RE and appears in the page title verbatim
+      only if it is in KNOWN_PROJECTS (else tagged), and generated_at / now must be
       tz-aware ISO-8601, or the call is refused (exit 2). There is no
       verbatim mode. The confidential-roster screen (A4a) is still unbuilt.
     * --in (and publish()'s payload_path) is refused if it is or lies under
@@ -103,6 +105,8 @@ COLUMN_HEADERS = ("Task ID (hmac)", "Title (hmac)", "State", "Owner", "Priority"
 HASHED_COLUMNS = frozenset({"task_id", "title"})
 TOKEN_ENV = "AAOS_NOTION_TOKEN"
 HASH_KEY_ENV = "AAOS_HASH_KEY"
+# Project ids that may appear verbatim in the page title; any other id is HMAC-tagged.
+KNOWN_PROJECTS = frozenset({"ora-ops"})
 MIN_HASH_KEY_LEN = 16
 TAG_HEX = 16
 
@@ -219,7 +223,8 @@ def build_notion_page_payload(
 
     project = _check_project(project)
     now_text = _iso(now_iso, "now")
-    title_text = f"AAOS Queue Status — {project} — {now_text}"
+    shown_project = project if project in KNOWN_PROJECTS else _tag(project, bytes(hash_key))
+    title_text = f"AAOS Queue Status — {shown_project} — {now_text}"
 
     stale = bool(generation.get("stale"))
     skipped = generation.get("skipped") or []
@@ -298,7 +303,9 @@ def publish(
     aaos.refuse_frozen_live_path(payload_path, "payload path (--in)")
 
     token = None
-    key_text = os.environ.get(HASH_KEY_ENV, "")
+    # Surrounding whitespace is not key material; the key needs MIN_HASH_KEY_LEN non-whitespace chars.
+    key_text = os.environ.get(HASH_KEY_ENV, "").strip()
+    key_ok = sum(1 for ch in key_text if not ch.isspace()) >= MIN_HASH_KEY_LEN
     if live:
         if not aaos.unfreeze_enabled():
             raise aaos.UsageError(
@@ -308,11 +315,11 @@ def publish(
         token = os.environ.get(TOKEN_ENV, "").strip() or None
         if not token:
             raise aaos.UsageError(f"{TOKEN_ENV} is required (unset) for --live; NOTION_TOKEN is not read")
-        if len(key_text) < MIN_HASH_KEY_LEN:
+        if not key_ok:
             raise aaos.UsageError(
-                f"{HASH_KEY_ENV} (at least {MIN_HASH_KEY_LEN} characters) is required for --live"
+                f"{HASH_KEY_ENV} (at least {MIN_HASH_KEY_LEN} non-whitespace characters) is required for --live"
             )
-    hash_key = key_text.encode("utf-8") if len(key_text) >= MIN_HASH_KEY_LEN else secrets.token_bytes(32)
+    hash_key = key_text.encode("utf-8") if key_ok else secrets.token_bytes(32)
 
     if not payload_path.exists():
         raise aaos.UsageError(

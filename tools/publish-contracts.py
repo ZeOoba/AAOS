@@ -234,7 +234,11 @@ def main(argv=None) -> int:
         )
         return 2
 
-    contracts_dir = seam_root / "contracts"
+    try:
+        contracts_dir = aaos.guard_path(seam_root / "contracts", "contracts dir")
+    except aaos.UsageError as exc:
+        print(f"USAGE ERROR: {exc}", file=sys.stderr)
+        return 2
 
     try:
         source_commit, dirty = _derive_source_commit(args.source_commit, repo_root)

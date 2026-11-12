@@ -266,7 +266,11 @@ def main(argv=None) -> int:
         print(f"USAGE ERROR: {exc}")
         return 2
 
-    tasks_dir = project_dir / "tasks"
+    try:
+        tasks_dir = aaos.guard_path(project_dir / "tasks", "tasks dir")
+    except aaos.UsageError as exc:
+        print(f"USAGE ERROR: {exc}")
+        return 2
     events_path = aaos.events_log_path(args.project, root=args.seam_root)
     hb_path = aaos.heartbeat_path(root=args.seam_root)
 
