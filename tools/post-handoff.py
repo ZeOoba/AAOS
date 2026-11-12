@@ -125,6 +125,11 @@ def main(argv=None) -> int:
 
     try:
         resolved_now = _resolve_now(args.now)
+        # Freeze sentinel (ADR-0007 addendum 2026-11-12): file arguments too, before any I/O.
+        aaos.refuse_frozen_live_paths(
+            [(args.summary_file, "--summary-file"), (args.registry, "--registry")]
+            + [(_parse_kv_args(tok, ("path",))["path"], "--artifact") for tok in (args.artifact or [])]
+        )
         aaos.require_seam_reachable(args.seam_root)
         if args.blocker and not (args.holder and args.session):
             raise aaos.UsageError(

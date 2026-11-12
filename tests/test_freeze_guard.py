@@ -1,49 +1,90 @@
 """
 tests/test_freeze_guard.py -- the in-code freeze sentinel (docs/adr/0007-freeze.md, addendum
-2026-11-12; audit finding M-no-in-code-freeze-guard).
+2026-11-12; audit findings M-no-in-code-freeze-guard and review items C1a/C1b/C1c/C2/C5).
 
-While AAOS is frozen, seam_root() / require_seam_reachable() must refuse the hard-coded live seam
-(LIVE_SEAM_ROOT) unless AAOS_UNFREEZE=1, by every route that reaches it: the no-override fallback,
-AAOS_SEAM_ROOT, an explicit --seam-root, a spelling variant, or a junction/symlink alias. Explicit
-override roots that are NOT the live seam (the per-test tmp seams the whole suite uses) keep working.
+While AAOS is frozen, any path that is, or lies under, the live seam (LIVE_SEAM_ROOT) is refused
+unless AAOS_UNFREEZE=1 -- whether it arrives as a seam root (default fallback, AAOS_SEAM_ROOT,
+--seam-root) or as a file path a CLI reads or writes (--out, --in, --signals, --summary-file,
+--artifact, --registry, --schema-dir, validate.py's positional path). Spelling tricks (case,
+separators, "..", trailing dot/space, NTFS stream suffixes, \\\\?\\ / \\\\.\\ / UNC admin-share
+prefixes, 8.3 short names, junctions/symlinks) are refused too. Roots that are not the live seam
+(the tmp seams the whole suite uses) keep working.
 
-No test here touches the live seam. Refusals of the literal live path are decided lexically before
-any filesystem call; the alias test points LIVE_SEAM_ROOT at a decoy folder.
+SAFETY: every test here points BOTH LIVE_SEAM_ROOT and DEFAULT_SEAM_ROOT at a decoy folder inside a
+tmp dir. No test ever passes the real live seam path to the guard or a CLI, so even a broken guard
+cannot make a test run touch the live seam.
 """
 from __future__ import annotations
 
+import ctypes
+import io
 import os
 import shutil
 import subprocess
 import sys
 import tempfile
 import unittest
+from contextlib import redirect_stderr, redirect_stdout
 from pathlib import Path
 from unittest import mock
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
-import _tool_loader  # noqa: F401,E402  (puts tools/ on sys.path)
+import _tool_loader  # noqa: E402  (puts tools/ on sys.path)
 import _aaos_common as aaos  # noqa: E402
 
-REAL_LIVE = aaos.LIVE_SEAM_ROOT if hasattr(aaos, "LIVE_SEAM_ROOT") else aaos.DEFAULT_SEAM_ROOT
+B = "\\"
+SCRUB = ("AAOS_UNFREEZE", "AAOS_SEAM_ROOT", "AAOS_NOTION_TOKEN", "NOTION_TOKEN", "AAOS_HASH_KEY")
 
 
 def _env_without(*names):
-    env = {k: v for k, v in os.environ.items() if k not in names}
-    return env
+    return {k: v for k, v in os.environ.items() if k not in names}
 
 
-class FreezeGuardTests(unittest.TestCase):
+def _short_path(p: str) -> str | None:
+    if os.name != "nt":
+        return None
+    buf = ctypes.create_unicode_buffer(1024)
+    n = ctypes.windll.kernel32.GetShortPathNameW(str(p), buf, 1024)
+    return buf.value if n and buf.value.lower() != str(p).lower() else None
+
+
+def _make_dir_link(link: Path, target: Path) -> bool:
+    try:
+        os.symlink(str(target), str(link), target_is_directory=True)
+        return True
+    except (OSError, NotImplementedError):
+        pass
+    if os.name == "nt":
+        proc = subprocess.run(["cmd", "/c", "mklink", "/J", str(link), str(target)], capture_output=True)
+        return proc.returncode == 0 and link.exists()
+    return False
+
+
+class _DecoyCase(unittest.TestCase):
+    """tmp dir with a decoy live seam (a folder whose name has a space, so it has an 8.3 alias)."""
+
     def setUp(self):
         self.tmp = Path(tempfile.mkdtemp(prefix="aaos-freeze-"))
         self.addCleanup(shutil.rmtree, str(self.tmp), ignore_errors=True)
-        # Default state for every test: frozen, no env seam.
-        patcher = mock.patch.dict(os.environ, _env_without("AAOS_UNFREEZE", "AAOS_SEAM_ROOT"), clear=True)
-        patcher.start()
-        self.addCleanup(patcher.stop)
+        self.decoy = self.tmp / "decoy Long Name Dir" / "AAOS"
+        (self.decoy / "projects" / "ora-ops" / "tasks").mkdir(parents=True)
+        self.other = self.tmp / "other-seam"
+        (self.other / "projects" / "ora-ops" / "tasks").mkdir(parents=True)
+        for p in (
+            mock.patch.dict(os.environ, _env_without(*SCRUB), clear=True),
+            mock.patch.object(aaos, "DEFAULT_SEAM_ROOT", str(self.decoy)),
+            mock.patch.object(aaos, "LIVE_SEAM_ROOT", str(self.decoy)),
+        ):
+            p.start()
+            self.addCleanup(p.stop)
 
-    def _assert_frozen_refusal(self, fn):
+    def _snapshot(self):
+        return sorted(str(p.relative_to(self.decoy)) for p in self.decoy.rglob("*"))
+
+
+class FreezeGuardTests(_DecoyCase):
+    def _refused(self, fn):
         with self.assertRaises(aaos.UsageError) as ctx:
             fn()
         msg = str(ctx.exception)
@@ -52,123 +93,214 @@ class FreezeGuardTests(unittest.TestCase):
         self.assertIn("AAOS_UNFREEZE", msg)
 
     def test_live_constant_is_the_hard_coded_onedrive_seam(self):
-        self.assertEqual(aaos.LIVE_SEAM_ROOT, aaos.DEFAULT_SEAM_ROOT)
-        self.assertIn("Claude_Workspace/AAOS", aaos.LIVE_SEAM_ROOT)
+        # String-only check against the unpatched module source value.
+        import importlib
+        src = Path(aaos.__file__).read_text(encoding="utf-8")
+        self.assertIn("LIVE_SEAM_ROOT = DEFAULT_SEAM_ROOT", src)
+        self.assertIn('Claude_Workspace/AAOS"', src)
+        del importlib
 
     def test_fallback_to_live_default_is_refused(self):
-        self._assert_frozen_refusal(lambda: aaos.seam_root())
+        self._refused(lambda: aaos.seam_root())
 
     def test_require_seam_reachable_refuses_live_default(self):
-        self._assert_frozen_refusal(lambda: aaos.require_seam_reachable())
+        self._refused(lambda: aaos.require_seam_reachable())
 
     def test_explicit_override_equal_to_live_is_refused(self):
-        self._assert_frozen_refusal(lambda: aaos.seam_root(REAL_LIVE))
+        self._refused(lambda: aaos.seam_root(str(self.decoy)))
 
     def test_env_var_pointing_at_live_is_refused(self):
-        with mock.patch.dict(os.environ, {"AAOS_SEAM_ROOT": REAL_LIVE}):
-            self._assert_frozen_refusal(lambda: aaos.seam_root())
+        with mock.patch.dict(os.environ, {"AAOS_SEAM_ROOT": str(self.decoy)}):
+            self._refused(lambda: aaos.seam_root())
+
+    def test_child_paths_of_live_are_refused(self):
+        """C1c: containment, not equality."""
+        for p in (self.decoy / "projects", self.decoy / "projects" / "ora-ops" / "heartbeat.json",
+                  self.decoy / "no-such-dir" / "x.json"):
+            with self.subTest(p=str(p)):
+                self._refused(lambda p=p: aaos.seam_root(str(p)))
+                self._refused(lambda p=p: aaos.refuse_frozen_live_path(str(p), "--out"))
+
+    def test_sibling_with_shared_prefix_is_allowed(self):
+        sib = Path(str(self.decoy) + "-copy")
+        sib.mkdir()
+        self.assertEqual(aaos.seam_root(str(sib)), sib)
 
     def test_spelling_variants_of_live_are_refused(self):
-        variants = [REAL_LIVE + "/", REAL_LIVE.replace("/", "\\"), REAL_LIVE + "/projects/.."]
+        d = str(self.decoy)
+        variants = [d + B, d + "/", d + B + "projects" + B + "..", d.replace(B, "/")]
         if os.name == "nt":
-            variants.append(REAL_LIVE.upper())
+            variants += [d.upper(), d + ".", d + " ", d + "::$INDEX_ALLOCATION"]
         for v in variants:
             with self.subTest(variant=v):
-                self._assert_frozen_refusal(lambda v=v: aaos.seam_root(v))
+                self._refused(lambda v=v: aaos.seam_root(v))
+
+    @unittest.skipUnless(os.name == "nt", "Windows path prefixes")
+    def test_device_and_unc_prefixes_are_refused(self):
+        """C1b: \\\\?\\, \\\\.\\, \\\\?\\UNC\\ and admin-share UNC spellings of the live seam."""
+        d = str(self.decoy)
+        drive, rest = d[0], d[2:]
+        variants = [
+            B + B + "?" + B + d,
+            B + B + "." + B + d,
+            B + B + "localhost" + B + drive + "$" + rest,
+            B + B + "127.0.0.1" + B + drive + "$" + rest,
+            B + B + "?" + B + "UNC" + B + "localhost" + B + drive + "$" + rest,
+            "//?/" + d.replace(B, "/"),
+            B + B + "?" + B + d + B + "projects",
+        ]
+        for v in variants:
+            with self.subTest(variant=v):
+                self._refused(lambda v=v: aaos.seam_root(v))
+
+    def test_short_name_alias_is_refused(self):
+        short = _short_path(str(self.decoy))
+        if not short:
+            self.skipTest("no 8.3 short name available on this host")
+        self._refused(lambda: aaos.seam_root(short))
+
+    def test_junction_or_symlink_alias_is_refused(self):
+        link = self.tmp / "alias"
+        if not _make_dir_link(link, self.decoy):
+            self.skipTest("cannot create a symlink or junction on this host")
+        self.addCleanup(lambda: os.rmdir(str(link)) if link.exists() else None)
+        self._refused(lambda: aaos.seam_root(str(link)))
+        self._refused(lambda: aaos.refuse_frozen_live_path(str(link / "heartbeat.json"), "--out"))
 
     def test_path_builders_inherit_the_refusal(self):
-        self._assert_frozen_refusal(lambda: aaos.project_dir("ora-ops"))
-        self._assert_frozen_refusal(lambda: aaos.heartbeat_path())
+        self._refused(lambda: aaos.project_dir("ora-ops"))
+        self._refused(lambda: aaos.heartbeat_path())
 
-    def test_unfreeze_sentinel_allows_live_default(self):
+    def test_unfreeze_sentinel_allows_live(self):
         with mock.patch.dict(os.environ, {"AAOS_UNFREEZE": "1"}):
-            self.assertEqual(aaos.seam_root(), Path(aaos.DEFAULT_SEAM_ROOT))
+            self.assertEqual(aaos.seam_root(), Path(str(self.decoy)))
+            aaos.refuse_frozen_live_path(str(self.decoy / "heartbeat.json"), "--out")
 
     def test_unfreeze_must_be_exactly_1(self):
         for val in ("", "0", "true", "yes", " 1"):
             with self.subTest(val=val):
                 with mock.patch.dict(os.environ, {"AAOS_UNFREEZE": val}):
-                    self._assert_frozen_refusal(lambda: aaos.seam_root())
+                    self._refused(lambda: aaos.seam_root())
 
     def test_explicit_tmp_override_is_allowed(self):
-        self.assertEqual(aaos.seam_root(str(self.tmp)), Path(str(self.tmp)))
-        self.assertEqual(aaos.require_seam_reachable(str(self.tmp)), Path(str(self.tmp)))
+        self.assertEqual(aaos.seam_root(str(self.other)), Path(str(self.other)))
+        self.assertEqual(aaos.require_seam_reachable(str(self.other)), Path(str(self.other)))
+        aaos.refuse_frozen_live_path(str(self.other / "heartbeat.json"), "--out")
 
     def test_env_override_elsewhere_is_allowed(self):
-        with mock.patch.dict(os.environ, {"AAOS_SEAM_ROOT": str(self.tmp)}):
-            self.assertEqual(aaos.seam_root(), Path(str(self.tmp)))
-            self.assertEqual(aaos.require_seam_reachable(), Path(str(self.tmp)))
-
-    def test_alias_to_live_is_refused(self):
-        """A junction/symlink leading to the live seam is the same directory. LIVE_SEAM_ROOT is
-        patched to a decoy so the real live seam is never touched."""
-        decoy = self.tmp / "live-decoy"
-        decoy.mkdir()
-        link = self.tmp / "alias"
-        try:
-            os.symlink(str(decoy), str(link), target_is_directory=True)
-        except (OSError, NotImplementedError):
-            if os.name != "nt":
-                self.skipTest("cannot create a symlink on this host")
-            proc = subprocess.run(["cmd", "/c", "mklink", "/J", str(link), str(decoy)], capture_output=True)
-            if proc.returncode != 0 or not link.exists():
-                self.skipTest("cannot create a symlink or junction on this host")
-        self.addCleanup(lambda: (os.rmdir(str(link)) if link.exists() else None))
-        with mock.patch.object(aaos, "LIVE_SEAM_ROOT", str(decoy)):
-            self._assert_frozen_refusal(lambda: aaos.seam_root(str(link)))
-            self._assert_frozen_refusal(lambda: aaos.seam_root(str(decoy)))
+        with mock.patch.dict(os.environ, {"AAOS_SEAM_ROOT": str(self.other)}):
+            self.assertEqual(aaos.seam_root(), Path(str(self.other)))
+            self.assertEqual(aaos.require_seam_reachable(), Path(str(self.other)))
 
     def test_patched_default_sentinel_is_not_mistaken_for_live(self):
-        """Other suites patch DEFAULT_SEAM_ROOT to an in-tmp sentinel; that must not be refused."""
+        """Other suites patch DEFAULT_SEAM_ROOT alone to an in-tmp sentinel; that must not be refused."""
         sentinel = self.tmp / "sentinel"
         with mock.patch.object(aaos, "DEFAULT_SEAM_ROOT", str(sentinel)):
             self.assertEqual(aaos.seam_root(), Path(str(sentinel)))
 
+    def test_nothing_was_written_under_the_decoy(self):
+        before = self._snapshot()
+        for fn in (aaos.seam_root, aaos.require_seam_reachable):
+            with self.assertRaises(aaos.UsageError):
+                fn()
+        self.assertEqual(self._snapshot(), before)
 
-class FreezeGuardCliTests(unittest.TestCase):
-    """Every seam CLI fails closed (exit 2, FROZEN on stderr) when it would fall back to the live
-    seam. Run IN-PROCESS with both DEFAULT_SEAM_ROOT and LIVE_SEAM_ROOT patched to a decoy inside a
-    tmp dir: a regression in the guard can then at worst touch the decoy, never the real seam."""
+
+class FreezeGuardCliTests(_DecoyCase):
+    """Every seam CLI, and every file-path argument, fails closed (exit 2, FROZEN in its output)
+    when it would touch the live seam. In-process, decoy-patched: a regression can at worst touch
+    the decoy, and the decoy's contents are asserted unchanged."""
 
     def setUp(self):
-        self.tmp = Path(tempfile.mkdtemp(prefix="aaos-freeze-cli-"))
-        self.addCleanup(shutil.rmtree, str(self.tmp), ignore_errors=True)
-        self.decoy = self.tmp / "live-decoy"
-        self.decoy.mkdir()
-        for p in (
-            mock.patch.dict(os.environ, _env_without("AAOS_UNFREEZE", "AAOS_SEAM_ROOT",
-                                                     "AAOS_NOTION_TOKEN", "NOTION_TOKEN"), clear=True),
-            mock.patch.object(aaos, "DEFAULT_SEAM_ROOT", str(self.decoy)),
-            mock.patch.object(aaos, "LIVE_SEAM_ROOT", str(self.decoy)),
-        ):
-            p.start()
-            self.addCleanup(p.stop)
+        super().setUp()
+        self.signals = self.tmp / "signals.json"
+        self.signals.write_text('{"agents": []}', encoding="utf-8")
+        # Seed files INSIDE the decoy so "refused" is about the freeze, not a missing file.
+        self.decoy_file = self.decoy / "projects" / "ora-ops" / "notion-projection.json"
+        self.decoy_file.write_text('{"generation": {}, "rows": []}', encoding="utf-8")
+        self.decoy_task = self.decoy / "projects" / "ora-ops" / "tasks" / "t-synthetic.json"
+        self.decoy_task.write_text("{}", encoding="utf-8")
+        self.decoy_sig = self.decoy / "signals.json"
+        self.decoy_sig.write_text('{"agents": []}', encoding="utf-8")
+        self.decoy_txt = self.decoy / "summary.txt"
+        self.decoy_txt.write_text("synthetic", encoding="utf-8")
+        self.baseline = self._snapshot()
 
-    def test_cli_refuses_live_default(self):
-        import io
-        from contextlib import redirect_stderr, redirect_stdout
-        signals = self.tmp / "signals.json"
-        signals.write_text('{"agents": []}', encoding="utf-8")
+    def _run(self, name, *argv):
+        module = _tool_loader.load_tool(name)
+        out, err = io.StringIO(), io.StringIO()
+        with redirect_stderr(err), redirect_stdout(out), mock.patch("urllib.request.urlopen") as net:
+            code = module.main(list(argv))
+        net.assert_not_called()
+        return code, out.getvalue() + err.getvalue()
+
+    def _assert_refused(self, name, *argv):
+        with self.subTest(tool=name, argv=argv[-2:]):
+            code, output = self._run(name, *argv)
+            self.assertEqual(code, 2, output)
+            self.assertIn("FROZEN", output)
+            self.assertEqual(self._snapshot(), self.baseline, "nothing may be written under the live seam")
+
+    NOW = ("--now", "2026-11-12T00:00:00+00:00")
+
+    def test_all_twelve_seam_clis_refuse_the_live_default(self):
+        lease = ("t-synthetic", "--holder", "claude-code", "--session", "s-1")
         cases = [
             ("create-task.py", "--id", "t-synthetic-freeze", "--title", "synthetic", "--accept", "x"),
+            ("lease-task.py", *lease),
+            ("complete-task.py", *lease),
+            ("fail-task.py", *lease, "--reason", "synthetic"),
+            ("post-handoff.py", "--id", "h-synthetic", "--task", "t-synthetic", "--from", "claude-code",
+             "--to", "cowork", "--next-action", "x", "--summary", "x"),
+            ("emit-event.py", "--type", "TaskCreated", "--actor", "claude-code", "--task", "t-synthetic"),
             ("expire-leases.py", "--dry-run"),
-            ("derive-heartbeat.py", "--signals", str(signals), "--now", "2026-11-12T00:00:00+00:00"),
-            ("project-notion.py",),
+            ("derive-heartbeat.py", "--signals", str(self.signals), *self.NOW),
+            ("project-notion.py", *self.NOW),
             ("check-contract-drift.py",),
             ("publish-contracts.py",),
             ("publish-notion.py",),
         ]
+        self.assertEqual(len(cases), 12)
         for name, *argv in cases:
-            with self.subTest(tool=name):
-                module = _tool_loader.load_tool(name)
-                err, out = io.StringIO(), io.StringIO()
-                with redirect_stderr(err), redirect_stdout(out), mock.patch("urllib.request.urlopen") as net:
-                    code = module.main(list(argv))
-                self.assertEqual(code, 2, out.getvalue() + err.getvalue())
-                # Some CLIs report usage errors on stdout (pre-existing behaviour), so check both.
-                self.assertIn("FROZEN", out.getvalue() + err.getvalue())
-                net.assert_not_called()
-        self.assertEqual(list(self.decoy.iterdir()), [], "nothing may be written under the live seam")
+            self._assert_refused(name, *argv)
+
+    def test_seam_root_child_and_prefixed_routes(self):
+        routes = [str(self.decoy / "projects")]
+        if os.name == "nt":
+            routes += [B + B + "?" + B + str(self.decoy),
+                       B + B + "localhost" + B + str(self.decoy)[0] + "$" + str(self.decoy)[2:]]
+        for r in routes:
+            self._assert_refused("create-task.py", "--id", "t-synthetic-freeze", "--title", "synthetic",
+                                 "--accept", "x", "--seam-root", r)
+
+    def test_out_paths_into_live_are_refused(self):
+        """C1a: --out bypassed the guard in derive-heartbeat and project-notion."""
+        self._assert_refused("derive-heartbeat.py", "--signals", str(self.signals), *self.NOW,
+                             "--seam-root", str(self.other), "--out", str(self.decoy / "heartbeat.json"))
+        self._assert_refused("project-notion.py", *self.NOW, "--seam-root", str(self.other),
+                             "--out", str(self.decoy / "projects" / "ora-ops" / "out.json"))
+
+    def test_input_paths_from_live_are_refused(self):
+        self._assert_refused("derive-heartbeat.py", "--signals", str(self.decoy_sig), *self.NOW,
+                             "--out", str(self.other / "heartbeat.json"))
+        self._assert_refused("publish-notion.py", "--in", str(self.decoy_file), *self.NOW)
+        self._assert_refused("validate.py", str(self.decoy_task))
+        self._assert_refused("validate.py", str(self.other / "t-x.json"), "--schema", "task",
+                             "--schema-dir", str(self.decoy))
+        self._assert_refused("validate.py", str(self.other / "t-x.json"), "--schema", "task",
+                             "--registry", str(self.decoy_txt))
+        base = ("--id", "h-synthetic", "--task", "t-synthetic", "--from", "claude-code", "--to", "cowork",
+                "--next-action", "x", "--seam-root", str(self.other))
+        self._assert_refused("post-handoff.py", *base, "--summary-file", str(self.decoy_txt))
+        self._assert_refused("post-handoff.py", *base, "--summary", "x", "--artifact", f"path={self.decoy_txt}")
+        self._assert_refused("post-handoff.py", *base, "--summary", "x", "--registry", str(self.decoy_txt))
+
+    def test_non_live_paths_still_work(self):
+        out = self.other / "heartbeat.json"
+        code, output = self._run("derive-heartbeat.py", "--signals", str(self.signals), *self.NOW,
+                                 "--out", str(out))
+        self.assertEqual(code, 0, output)
+        self.assertTrue(out.exists())
 
 
 if __name__ == "__main__":

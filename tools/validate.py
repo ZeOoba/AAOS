@@ -73,6 +73,7 @@ from pathlib import Path
 from jsonschema import Draft202012Validator
 
 from _aaos_common import match_write_scope  # single home (Phase 3 lift, PHASE3-DESIGN.md §1.1)
+import _aaos_common as _aaos  # freeze sentinel (ADR-0007 addendum 2026-11-12)
 
 SCRIPT_DIR = Path(__file__).resolve().parent
 REPO_ROOT = SCRIPT_DIR.parent
@@ -434,6 +435,14 @@ def build_arg_parser() -> argparse.ArgumentParser:
 
 def main(argv=None) -> int:
     args = build_arg_parser().parse_args(argv)
+
+    # Freeze sentinel (ADR-0007 addendum 2026-11-12): every file-path argument, not only the seam
+    # root, is refused if it is or lies under the live seam -- before any read or write.
+    try:
+        _aaos.refuse_frozen_live_paths([(args.path, "path"), (args.schema_dir, "--schema-dir"), (args.registry, "--registry")])
+    except _aaos.UsageError as exc:
+        print(f"USAGE ERROR: {exc}")
+        return 2
 
     target = Path(args.path)
     schema_dir = Path(args.schema_dir) if args.schema_dir else DEFAULT_SCHEMA_DIR

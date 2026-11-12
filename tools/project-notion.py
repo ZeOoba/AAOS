@@ -238,6 +238,14 @@ def build_arg_parser() -> argparse.ArgumentParser:
 def main(argv=None) -> int:
     args = build_arg_parser().parse_args(argv)
 
+    # Freeze sentinel (ADR-0007 addendum 2026-11-12): every file-path argument, not only the seam
+    # root, is refused if it is or lies under the live seam -- before any read or write.
+    try:
+        aaos.refuse_frozen_live_paths([(args.out, "--out")])
+    except aaos.UsageError as exc:
+        print(f"USAGE ERROR: {exc}")
+        return 2
+
     if args.now:
         try:
             now = aaos._parse_iso_dt(args.now)

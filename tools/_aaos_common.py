@@ -211,56 +211,114 @@ def unfreeze_enabled() -> bool:
     return os.environ.get(UNFREEZE_ENV) == "1"
 
 
-def _seam_key(path: str) -> str:
-    """Lexical comparison key: forward slashes, "."/".." collapsed, no trailing slash, and
-    case-folded on Windows. Pure string work -- no filesystem access."""
-    s = posixpath.normpath(str(path).replace("\\", "/"))
-    if s != "/":
+_ADMIN_SHARE_RE = re.compile(r"^//[^/]+/([a-zA-Z])\$(/.*)?$")
+
+
+def _seam_key(path) -> str:
+    """Lexical comparison key. Pure string work -- no filesystem access.
+
+    Forward slashes; Win32 device prefixes removed (//?/UNC/h/s -> //h/s, //?/X and //./X -> X);
+    an admin share on ANY host (//host/c$/rest) mapped to c:/rest, which fails closed for a
+    remote machine's admin share that mirrors the live path; "."/".." collapsed; no trailing
+    slash. On Windows additionally: each component loses trailing dots/spaces and any NTFS
+    stream suffix (":$INDEX_ALLOCATION", ":name:$DATA"), which Win32 ignores when opening the
+    path, and the key is case-folded."""
+    s = str(path).replace("\\", "/")
+    low = s.lower()
+    if low.startswith(("//?/unc/", "//./unc/")):
+        s = "//" + s[8:]
+    elif low.startswith(("//?/", "//./")):
+        s = s[4:]
+    m = _ADMIN_SHARE_RE.match(s)
+    if m:
+        s = f"{m.group(1)}:{m.group(2) or '/'}"
+    s = posixpath.normpath(s)
+    if os.name == "nt":
+        drive, rest = (s[:2], s[2:]) if len(s) >= 2 and s[1] == ":" else ("", s)
+        parts = [p.split(":", 1)[0].rstrip(". ") if p not in (".", "..") else p for p in rest.split("/")]
+        s = posixpath.normpath(drive + "/".join(parts)) if (drive or any(parts)) else s
+        s = s.lower()
+    if s not in ("/", "//"):
         s = s.rstrip("/")
-    return s.lower() if os.name == "nt" else s
+    return s
 
 
-def _is_live_seam(candidate: str) -> bool:
-    """True if `candidate` is, or resolves to, LIVE_SEAM_ROOT.
+def _under(key: str, root_key: str) -> bool:
+    return key == root_key or key.startswith(root_key.rstrip("/") + "/")
 
-    The lexical checks run first and never touch the filesystem, so refusing a literal spelling
-    of the live path performs no I/O against it. Only if those miss is the CANDIDATE's realpath
-    taken (resolving a junction/symlink alias); the live path itself is never stat'ed or opened.
-    LIVE_SEAM_ROOT is read at call time so tests can point it at a decoy."""
+
+def _frozen_error(candidate, label: str, why: str) -> UsageError:
+    return UsageError(
+        f"AAOS is FROZEN (docs/adr/0007-freeze.md): refusing '{candidate}' ({label}): {why}. "
+        f"Point --seam-root/AAOS_SEAM_ROOT and every file argument at a copy or a test seam, or "
+        f"set {UNFREEZE_ENV}=1 only under a revival ADR that un-freezes AAOS."
+    )
+
+
+def refuse_frozen_live_path(candidate, label: str) -> None:
+    r"""Raise UsageError if, while AAOS is frozen, `candidate` is or lies under LIVE_SEAM_ROOT.
+
+    Applies to seam roots AND to every file path a CLI reads or writes (--out, --in, --signals,
+    --summary-file, --artifact, --registry, --schema-dir, validate.py's positional path).
+    LIVE_SEAM_ROOT is read at call time so tests can point it at a decoy. Steps, in order:
+
+      1. Lexical containment on the normalized key (see _seam_key) of the path as given and of
+         its os.path.abspath (string-only on every platform). No filesystem access: refusing any
+         literal spelling of the live seam, or of a path under it, never touches it.
+      2. While frozen, any path spelled with a leading \\ or // (UNC share, \\?\ or \\.\
+         device namespace) is refused outright: a share name can lead anywhere, including the
+         live seam, and cannot be keyed reliably without resolving it.
+      3. Only if 1 and 2 pass: os.path.realpath(candidate), to catch an alias (junction,
+         symlink, 8.3 short name, subst drive). realpath DOES open a read-only handle on the
+         candidate and, when the candidate is an alias, on its target -- which may be the live
+         seam. That is a metadata open, never a write, and it only happens for a spelling that
+         step 1 could not recognise.
+    """
+    if unfreeze_enabled():
+        return
     live = LIVE_SEAM_ROOT
     live_keys = {_seam_key(live), _seam_key(os.path.abspath(live))}
-    if _seam_key(candidate) in live_keys or _seam_key(os.path.abspath(candidate)) in live_keys:
-        return True
+    raw = str(candidate)
+
+    def hit(key: str) -> bool:
+        return any(_under(key, lk) for lk in live_keys)
+
+    if hit(_seam_key(raw)):
+        raise _frozen_error(candidate, label, "it is, or is under, the live seam")
+    if raw.replace("\\", "/").startswith("//"):
+        raise _frozen_error(candidate, label, "UNC and device-namespace paths are refused while frozen")
     try:
-        return _seam_key(os.path.realpath(candidate)) in live_keys
+        if hit(_seam_key(os.path.abspath(raw))):
+            raise _frozen_error(candidate, label, "it is, or is under, the live seam")
+        resolved = os.path.realpath(raw)
     except (OSError, ValueError):
-        return False
-
-
-def _refuse_if_frozen_live(candidate: str, route: str) -> None:
-    if unfreeze_enabled() or not _is_live_seam(candidate):
         return
-    raise UsageError(
-        f"AAOS is FROZEN (docs/adr/0007-freeze.md): refusing to use the live seam "
-        f"'{candidate}' (selected via {route}). Point --seam-root/AAOS_SEAM_ROOT at a copy or a "
-        f"test seam, or set {UNFREEZE_ENV}=1 only under a revival ADR that un-freezes AAOS."
-    )
+    if hit(_seam_key(resolved)):
+        raise _frozen_error(candidate, label, "it resolves (via an alias) to, or under, the live seam")
+
+
+def refuse_frozen_live_paths(pairs) -> None:
+    """refuse_frozen_live_path over (path, label) pairs; None/empty paths and "-" (stdin) skip.
+    Every CLI calls this on all of its file-path arguments before any I/O."""
+    for path, label in pairs:
+        if path and path != "-":
+            refuse_frozen_live_path(path, label)
 
 
 def seam_root(override: str | None = None) -> Path:
     """Resolve the seam root: explicit override, then $AAOS_SEAM_ROOT, then DEFAULT_SEAM_ROOT.
 
-    Freeze sentinel (ADR-0007 addendum 2026-11-12): whichever route is taken, a root that is or
-    resolves to LIVE_SEAM_ROOT raises UsageError unless AAOS_UNFREEZE=1. Every path builder and
-    require_seam_reachable() goes through here, so every seam CLI fails closed (exit 2)."""
+    Freeze sentinel (ADR-0007 addendum 2026-11-12): whichever route is taken, a root that is, is
+    under, or resolves to LIVE_SEAM_ROOT raises UsageError unless AAOS_UNFREEZE=1. Every path
+    builder and require_seam_reachable() goes through here, so every seam CLI fails closed."""
     if override:
-        _refuse_if_frozen_live(override, "--seam-root/root override")
+        refuse_frozen_live_path(override, "--seam-root/root override")
         return Path(override)
     env = os.environ.get("AAOS_SEAM_ROOT")
     if env:
-        _refuse_if_frozen_live(env, "AAOS_SEAM_ROOT")
+        refuse_frozen_live_path(env, "AAOS_SEAM_ROOT")
         return Path(env)
-    _refuse_if_frozen_live(DEFAULT_SEAM_ROOT, "the built-in default")
+    refuse_frozen_live_path(DEFAULT_SEAM_ROOT, "the built-in default seam")
     return Path(DEFAULT_SEAM_ROOT)
 
 
