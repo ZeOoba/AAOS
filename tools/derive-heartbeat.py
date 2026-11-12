@@ -88,7 +88,7 @@ def _read_signals_text(signals_arg: str) -> str:
         return sys.stdin.read()
     path = Path(signals_arg)
     try:
-        return path.read_text(encoding="utf-8")
+        return aaos.g_read_text(path)
     except OSError as exc:
         raise aaos.UsageError(f"could not read --signals file '{path}': {exc}") from exc
 
@@ -267,6 +267,7 @@ def build_arg_parser() -> argparse.ArgumentParser:
     return parser
 
 
+@aaos.freeze_exit
 def main(argv=None) -> int:
     args = build_arg_parser().parse_args(argv)
 

@@ -174,7 +174,7 @@ def _build_copy_plan(repo_root: Path, contracts_dir: Path) -> list[tuple[Path, P
         plan.append((docs_dir / name, contracts_dir / name))
 
     if templates_dir.is_dir():
-        for tf in sorted(p for p in templates_dir.iterdir() if p.is_file()):
+        for tf in sorted(p for p in aaos.g_iterdir(templates_dir) if p.is_file()):
             plan.append((tf, contracts_dir / "templates" / tf.name))
     else:
         plan.append((templates_dir, contracts_dir / "templates"))
@@ -183,9 +183,10 @@ def _build_copy_plan(repo_root: Path, contracts_dir: Path) -> list[tuple[Path, P
 
 
 def _sha256(path: Path) -> str:
-    return hashlib.sha256(path.read_bytes()).hexdigest()
+    return hashlib.sha256(aaos.g_read_bytes(path)).hexdigest()
 
 
+@aaos.freeze_exit
 def main(argv=None) -> int:
     args = build_arg_parser().parse_args(argv)
     repo_root = REPO_ROOT  # re-read the module global at call time (tests monkeypatch it)
@@ -198,6 +199,8 @@ def main(argv=None) -> int:
 
     try:
         contracts_dir = aaos.guard_path(seam_root / "contracts", "contracts dir")
+        if contracts_dir.is_dir():
+            aaos.g_walk(contracts_dir)  # screen every mirror entry up front: a junction anywhere in it refuses the run
     except aaos.UsageError as exc:
         print(f"USAGE ERROR: {exc}", file=sys.stderr)
         return 2
@@ -230,7 +233,7 @@ def main(argv=None) -> int:
         return 1
 
     try:
-        published_text = published_path.read_text(encoding="utf-8")
+        published_text = aaos.g_read_text(published_path)
     except (OSError, UnicodeDecodeError) as exc:
         # Finding 2 (adversarial review): a non-UTF-8 PUBLISHED.json (e.g.
         # a OneDrive conflict artifact, a botched manual edit) previously
@@ -288,7 +291,7 @@ def main(argv=None) -> int:
             )
 
     if contracts_dir.is_dir():
-        for path in sorted(contracts_dir.rglob("*")):
+        for path in sorted(aaos.g_walk(contracts_dir)):
             if path.is_file() and path not in expected_dests:
                 findings.append(f"UNEXPECTED FILE IN MIRROR: {path}")
 

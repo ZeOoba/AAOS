@@ -113,7 +113,7 @@ TAG_HEX = 16
 
 def _task_states() -> frozenset:
     try:
-        schema = json.loads((aaos.SCHEMA_DIR / "task.schema.json").read_text(encoding="utf-8"))
+        schema = json.loads(aaos.g_read_text(aaos.SCHEMA_DIR / "task.schema.json"))
         return frozenset(schema["properties"]["state"]["enum"])
     except (OSError, ValueError, KeyError, TypeError):
         return frozenset()  # fail closed: every state gets tagged
@@ -398,6 +398,7 @@ def build_arg_parser() -> argparse.ArgumentParser:
     return parser
 
 
+@aaos.freeze_exit
 def main(argv=None) -> int:
     args = build_arg_parser().parse_args(argv)
 

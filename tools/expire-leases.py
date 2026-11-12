@@ -93,6 +93,7 @@ def _escalate_corrupt(project, root, resolved_now, entry, dry_run):
     print(f"CORRUPT LOCK: {entry} -> Escalated, skipped (not reclaimed)")
 
 
+@aaos.freeze_exit
 def main(argv=None) -> int:
     args = build_arg_parser().parse_args(argv)
     try:
@@ -112,9 +113,11 @@ def main(argv=None) -> int:
 
         heartbeat = aaos.load_heartbeat(root=args.seam_root)
 
-        for entry in sorted(p for p in locks_dir.iterdir() if p.is_file() and ".tmp-" not in p.name):
+        for entry in sorted(p for p in aaos.g_iterdir(locks_dir) if p.is_file() and ".tmp-" not in p.name):
             try:
                 lock = aaos.load_json(entry)
+            except aaos.FrozenSeamError:
+                raise
             except aaos.AaosError:
                 _escalate_corrupt(args.project, args.seam_root, resolved_now, entry, args.dry_run)
                 continue
@@ -138,6 +141,8 @@ def main(argv=None) -> int:
 
             try:
                 task = aaos.load_task(task_id, args.project, root=args.seam_root)
+            except aaos.FrozenSeamError:
+                raise
             except aaos.AaosError:
                 _escalate_corrupt(args.project, args.seam_root, resolved_now, entry, args.dry_run)
                 continue

@@ -163,6 +163,13 @@ class CorruptStateError(AaosError):
     """Unparseable lock/task/expiry; fail-closed -> exit 1."""
 
 
+class FrozenSeamError(UsageError):
+    """A path is, lies under, or resolves into the live seam while AAOS is frozen
+    (docs/adr/0007-freeze.md). A UsageError (exit 2), but a distinct type so the
+    handlers that treat an unreadable state file as "corrupt"/"conflict" re-raise it
+    instead of folding a freeze refusal into some other code path."""
+
+
 class EventCommitError(AaosError):
     """emit_event's durable commit failed -> exit 5.
 
@@ -248,7 +255,7 @@ def _under(key: str, root_key: str) -> bool:
 
 
 def _frozen_error(candidate, label: str, why: str) -> UsageError:
-    return UsageError(
+    return FrozenSeamError(
         f"AAOS is FROZEN (docs/adr/0007-freeze.md): refusing '{candidate}' ({label}): {why}. "
         f"Point --seam-root/AAOS_SEAM_ROOT and every file argument at a copy or a test seam, or "
         f"set {UNFREEZE_ENV}=1 only under a revival ADR that un-freezes AAOS."
@@ -361,6 +368,120 @@ def guard_path(path, label: str = "derived seam path") -> Path:
     return Path(path)
 
 
+# >>> GUARDED I/O PRIMITIVES (ADR-0007 addendum 2026-11-12)
+# These are the ONLY raw filesystem calls allowed anywhere in tools/ (enforced by
+# tests/test_io_guard_static.py). Each one runs refuse_frozen_live_path() on every path it is
+# given -- source AND destination for moves/links, every entry an enumeration returns -- so a
+# junction or symlink anywhere below an allowed root cannot carry a read, write, move or
+# directory listing into the live seam, whichever route built the path. Each wrapper calls the
+# underlying os/pathlib/builtin function at call time, so tests that patch os.replace, os.link,
+# Path.read_text, builtins.open, etc. keep working.
+
+def _io_guard(*paths) -> None:
+    for p in paths:
+        refuse_frozen_live_path(p, "filesystem I/O")
+
+
+def g_makedirs(path) -> None:
+    _io_guard(path)
+    os.makedirs(path, exist_ok=True)
+
+
+def g_replace(src, dst) -> None:
+    _io_guard(src, dst)
+    os.replace(str(src), str(dst))
+
+
+def g_rename(src, dst) -> None:
+    _io_guard(src, dst)
+    os.rename(str(src), str(dst))
+
+
+def g_link(src, dst) -> None:
+    _io_guard(src, dst)
+    os.link(str(src), str(dst))
+
+
+def g_unlink(path) -> None:
+    _io_guard(path)
+    os.unlink(str(path))
+
+
+def g_open(path, mode: str = "r", **kwargs):
+    _io_guard(path)
+    return open(path, mode, **kwargs)
+
+
+def g_os_open(path, flags: int, mode: int = 0o777) -> int:
+    _io_guard(path)
+    return os.open(str(path), flags, mode)
+
+
+def g_read_text(path, encoding: str = "utf-8") -> str:
+    _io_guard(path)
+    return Path(path).read_text(encoding=encoding)
+
+
+def g_read_bytes(path) -> bytes:
+    _io_guard(path)
+    return Path(path).read_bytes()
+
+
+def g_iterdir(path) -> list:
+    """Directory listing; the directory and EVERY entry are screened (an entry that is itself a
+    junction into the live seam refuses the whole listing)."""
+    _io_guard(path)
+    entries = list(Path(path).iterdir())
+    _io_guard(*entries)
+    return entries
+
+
+def g_glob(path, pattern: str) -> list:
+    _io_guard(path)
+    entries = list(Path(path).glob(pattern))
+    _io_guard(*entries)
+    return entries
+
+
+def _is_alias(p: Path) -> bool:
+    if os.path.islink(str(p)):
+        return True
+    is_junction = getattr(p, "is_junction", None)  # Python 3.12+
+    if is_junction is not None and is_junction():
+        return True
+    return os.path.normcase(os.path.realpath(str(p))) != os.path.normcase(os.path.abspath(str(p)))
+
+
+def g_walk(path) -> list:
+    """Recursive listing (replaces Path.rglob("*")): every entry is screened, and the walk never
+    descends into a symlink/junction (an alias into the live seam is refused by the screen; any
+    other alias is listed but not entered, so no cycle and no escape)."""
+    out = []
+    for entry in g_iterdir(path):
+        out.append(entry)
+        if entry.is_dir() and not _is_alias(entry):
+            out.extend(g_walk(entry))
+    return out
+
+
+def freeze_exit(main_fn):
+    """Decorator for every CLI main(): a FrozenSeamError raised by a guarded primitive deep inside
+    a tool (outside that tool's own try blocks) still exits 2 with a USAGE ERROR line, never a
+    traceback or a generic exit 1."""
+    import functools
+
+    @functools.wraps(main_fn)
+    def wrapper(argv=None):
+        try:
+            return main_fn(argv)
+        except FrozenSeamError as exc:
+            print(f"USAGE ERROR: {exc}", file=sys.stderr)
+            return 2
+
+    return wrapper
+# <<< GUARDED I/O PRIMITIVES
+
+
 def project_dir(project_id: str, *, root: str | None = None) -> Path:
     _validate_project_id(project_id)
     return guard_path(seam_root(root) / "projects" / project_id, "project dir")
@@ -381,8 +502,12 @@ def lock_path(task_id, project_id, *, root: str | None = None) -> Path:
     return guard_path(project_dir(project_id, root=root) / "locks" / f"{task_id}.lock", "lock path")
 
 
+def _lock_archive_dir_of(locks_dir) -> Path:
+    return guard_path(Path(locks_dir) / "_archive", "lock archive dir")
+
+
 def lock_archive_dir(project_id, *, root: str | None = None) -> Path:
-    return guard_path(project_dir(project_id, root=root) / "locks" / "_archive", "lock archive dir")
+    return _lock_archive_dir_of(project_dir(project_id, root=root) / "locks")
 
 
 def events_log_path(project_id, *, root: str | None = None) -> Path:
@@ -429,19 +554,19 @@ def atomic_write(path: Path | str, content: str | bytes) -> None:
     os.fsync(); os.replace(tmp, path); on any exception, best-effort unlink
     the temp and re-raise. Never writes `path` in place."""
     path = Path(path)
-    os.makedirs(path.parent, exist_ok=True)
+    g_makedirs(path.parent)
     tmp = Path(str(path) + ".tmp-" + str(os.getpid()))
     try:
         data = content.encode("utf-8") if isinstance(content, str) else content
-        with open(tmp, "wb") as fh:
+        with g_open(tmp, "wb") as fh:
             fh.write(data)
             fh.flush()
             os.fsync(fh.fileno())
-        os.replace(str(tmp), str(path))
+        g_replace(tmp, path)
     except Exception:
         try:
             if tmp.exists():
-                tmp.unlink()
+                g_unlink(tmp)
         except OSError:
             pass
         raise
@@ -450,7 +575,7 @@ def atomic_write(path: Path | str, content: str | bytes) -> None:
 def load_json(path: Path | str) -> dict:
     path = Path(path)
     try:
-        raw = path.read_text(encoding="utf-8")
+        raw = g_read_text(path)
     except OSError as exc:
         raise UsageError(f"could not read {path}: {exc}") from exc
     try:
@@ -548,7 +673,7 @@ def validate_obj(obj: dict, schema_name: str, *, registry: dict | None = None) -
     import validate as _validate  # lazy: see module docstring's cycle note
 
     schema_path = SCHEMA_DIR / f"{schema_name}.schema.json"
-    schema = json.loads(schema_path.read_text(encoding="utf-8"))
+    schema = json.loads(g_read_text(schema_path))
     validator = Draft202012Validator(schema)
 
     if schema_name == "handoff" and registry is None:
@@ -742,12 +867,12 @@ def archive_lock(lock_file: Path | str, *, now: datetime | None = None) -> Path:
     resolved_now = _now(now)
     base = lock_file.name.split(".lock", 1)[0]
     compact_ts = resolved_now.strftime("%Y%m%dT%H%M%S%f")
-    archive_dir = lock_file.parent / "_archive"
-    os.makedirs(archive_dir, exist_ok=True)
+    archive_dir = _lock_archive_dir_of(lock_file.parent)  # same builder as lock_archive_dir()
+    g_makedirs(archive_dir)
     target = archive_dir / f"{base}.{compact_ts}.lock"
     if target.exists():
         target = archive_dir / f"{base}.{compact_ts}.{os.getpid()}.lock"
-    os.replace(str(lock_file), str(target))
+    g_replace(lock_file, target)
     return target
 
 
@@ -786,6 +911,8 @@ def archive_lock_if_unchanged(lock_file: Path | str, expected: dict, *, now: dat
         return None
     try:
         archived = load_json(target)
+    except FrozenSeamError:
+        raise
     except AaosError:
         archived = None
     if archived != expected:
@@ -801,16 +928,16 @@ def _restore_archived_lock(archived: Path, lock_file: Path, *, now: datetime | N
     best-effort Escalated event. Never raises."""
     try:
         try:
-            os.link(str(archived), str(lock_file))
+            g_link(archived, lock_file)
         except FileExistsError:
             raise
         except OSError:
             if os.name != "nt":
                 raise  # POSIX rename clobbers: no safe fallback
-            os.rename(str(archived), str(lock_file))  # Windows rename refuses an existing dest
+            g_rename(archived, lock_file)  # Windows rename refuses an existing dest
         else:
             try:
-                os.unlink(str(archived))  # second name of the restored file; no data lost
+                g_unlink(archived)  # second name of the restored file; no data lost
             except OSError:
                 pass  # harmless: a duplicate name left in _archive
         return True
@@ -863,7 +990,7 @@ def _scan_for_conflicts(locks_dir: Path, task_id: str, holder: str, session: str
     if not locks_dir.is_dir():
         return conflicts
     canonical_name = f"{task_id}.lock"
-    for entry in sorted(locks_dir.iterdir(), key=lambda p: p.name):
+    for entry in sorted(g_iterdir(locks_dir), key=lambda p: p.name):
         if not entry.is_file():
             continue
         name = entry.name
@@ -872,6 +999,8 @@ def _scan_for_conflicts(locks_dir: Path, task_id: str, holder: str, session: str
         if name == canonical_name:
             try:
                 data = load_json(entry)
+            except FrozenSeamError:
+                raise
             except AaosError:
                 conflicts.append(str(entry))
                 continue
@@ -892,6 +1021,8 @@ def _scan_for_conflicts(locks_dir: Path, task_id: str, holder: str, session: str
         # merely held its own live lock).
         try:
             data = load_json(entry)
+        except FrozenSeamError:
+            raise
         except AaosError:
             conflicts.append(str(entry))  # unparseable -- fail closed, still a conflict
             continue
@@ -914,7 +1045,7 @@ def _exclusive_create(path: Path, data: bytes) -> None:
     flags = os.O_CREAT | os.O_EXCL | os.O_WRONLY
     if hasattr(os, "O_BINARY"):
         flags |= os.O_BINARY
-    fd = os.open(str(path), flags)
+    fd = g_os_open(path, flags)
     try:
         os.write(fd, data)
     finally:
@@ -942,7 +1073,7 @@ def _exclusive_link(source: Path, dest: Path, data: bytes) -> None:
     hardlink support is a filesystem property we should not assume for all time.
     """
     try:
-        os.link(str(source), str(dest))
+        g_link(source, dest)
     except FileExistsError:
         raise
     except OSError:
@@ -1062,12 +1193,12 @@ def acquire_lease(
     def _cleanup_sidecar():
         try:
             if sidecar.exists():
-                sidecar.unlink()
+                g_unlink(sidecar)
         except OSError:
             pass
 
     # ---- 3. Exclusive create ----
-    os.makedirs(final_lock_path.parent, exist_ok=True)
+    g_makedirs(final_lock_path.parent)
     try:
         _exclusive_link(sidecar, final_lock_path, content_bytes)
         _cleanup_sidecar()
@@ -1186,12 +1317,12 @@ def commit_state_change(new_state_obj: dict, state_path: Path | str, event: dict
         event_id = emit_event(**event, root=root)
     except EventCommitError:
         try:
-            os.unlink(str(tmp))
+            g_unlink(tmp)
         except OSError:
             pass
         raise
 
-    os.replace(str(tmp), str(state_path))
+    g_replace(tmp, state_path)
     return event_id
 
 
@@ -1284,7 +1415,7 @@ def spool_event(event: dict, project_id, *, root: str | None = None) -> Path:
     silently clobber the first thread's still-unread pending file, which is
     exactly the class of bug this whole redesign exists to eliminate."""
     spool_dir = event_spool_dir(project_id, root=root)
-    os.makedirs(spool_dir, exist_ok=True)
+    g_makedirs(spool_dir)
     target = spool_dir / f"{time.time_ns()}-{os.getpid()}-{uuid.uuid4().hex}.json"
     atomic_write(target, json.dumps(event, ensure_ascii=False))
     return target
@@ -1316,17 +1447,17 @@ def _exclusive_publish(path: Path, data: bytes) -> None:
     exists) but atomic-with-full-content -- there is no name under which
     the file is visible before its content is complete."""
     path = Path(path)
-    os.makedirs(path.parent, exist_ok=True)
+    g_makedirs(path.parent)
     tmp = path.parent / f"{path.name}.tmp-{os.getpid()}-{uuid.uuid4().hex}"
-    with open(tmp, "wb") as fh:
+    with g_open(tmp, "wb") as fh:
         fh.write(data)
         fh.flush()
         os.fsync(fh.fileno())
     try:
-        os.link(str(tmp), str(path))
+        g_link(tmp, path)
     finally:
         try:
-            tmp.unlink()
+            g_unlink(tmp)
         except OSError:
             pass
 
@@ -1353,7 +1484,7 @@ def _read_drain_lock_acquired(lock_path: Path) -> datetime | None:
     NDJSON from the same snapshot is the lost-event race this whole
     mechanism exists to prevent."""
     try:
-        raw = lock_path.read_text(encoding="utf-8")
+        raw = g_read_text(lock_path)
     except UnicodeDecodeError:
         return None
     try:
@@ -1380,7 +1511,7 @@ def _try_acquire_drain_lock(project_id, *, root: str | None = None, now: datetim
         ensure_ascii=False,
     ).encode("utf-8")
 
-    os.makedirs(lock_path.parent, exist_ok=True)
+    g_makedirs(lock_path.parent)
     for _attempt in range(2):
         try:
             _exclusive_publish(lock_path, content)
@@ -1419,13 +1550,13 @@ def _try_acquire_drain_lock(project_id, *, root: str | None = None, now: datetim
                 return None  # a live drainer is active -- never steal, never block
 
             archive_dir = _events_archive_dir(project_id, root=root)
-            os.makedirs(archive_dir, exist_ok=True)
+            g_makedirs(archive_dir)
             compact_ts = resolved_now.strftime("%Y%m%dT%H%M%S%f")
             target = archive_dir / f"drainlock.{compact_ts}"
             if target.exists():
                 target = archive_dir / f"drainlock.{compact_ts}.{os.getpid()}"
             try:
-                os.replace(str(lock_path), str(target))
+                g_replace(lock_path, target)
             except FileNotFoundError:
                 pass  # someone else already cleared it -- fall through and retry create
     return None
@@ -1449,7 +1580,7 @@ def _release_drain_lock(lock_path: Path) -> None:
     violations clear in low single-digit milliseconds in practice."""
     for attempt in range(10):
         try:
-            os.unlink(str(lock_path))
+            g_unlink(lock_path)
             return
         except FileNotFoundError:
             return
@@ -1486,7 +1617,7 @@ def _read_pending_text(p: Path):
     Shared by drain_event_spool and read_events so both ride out the same transient faults."""
     for attempt in range(_PENDING_READ_ATTEMPTS):
         try:
-            return "ok", p.read_text(encoding="utf-8-sig")
+            return "ok", g_read_text(p, encoding="utf-8-sig")
         except FileNotFoundError:
             return "vanished", None
         except UnicodeDecodeError as exc:
@@ -1532,8 +1663,8 @@ def _quarantine_pending(p: Path, name: str, corrupt_dir: Path, why) -> bool:
     behind it. The warning says truthfully which of the two happened. Returns True if moved."""
     target = corrupt_dir / name
     try:
-        os.makedirs(corrupt_dir, exist_ok=True)
-        os.replace(str(p), str(target))
+        g_makedirs(corrupt_dir)
+        g_replace(p, target)
     except OSError as move_exc:
         print(
             f"WARNING: malformed pending event file {name} could not move to {target} ({move_exc}); "
@@ -1607,7 +1738,7 @@ def drain_event_spool(project_id, *, root: str | None = None, now: datetime | No
         return 0
 
     def _list_pending():
-        return sorted(p.name for p in spool_dir.iterdir() if p.is_file() and p.name.endswith(".json"))
+        return sorted(p.name for p in g_iterdir(spool_dir) if p.is_file() and p.name.endswith(".json"))
 
     if not _list_pending():
         return 0
@@ -1625,7 +1756,7 @@ def drain_event_spool(project_id, *, root: str | None = None, now: datetime | No
         existing_content = ""
         existing_ids: set = set()
         if log_path.exists():
-            existing_content = log_path.read_text(encoding="utf-8")
+            existing_content = g_read_text(log_path)
             for line in existing_content.splitlines():
                 line = line.strip()
                 if not line:
@@ -1703,13 +1834,13 @@ def drain_event_spool(project_id, *, root: str | None = None, now: datetime | No
             content += "\n".join(new_lines) + "\n"
             tmp = log_path.parent / f"{log_path.name}.tmp-{os.getpid()}"
             atomic_write(tmp, content)
-            os.replace(str(tmp), str(log_path))
+            g_replace(tmp, log_path)
 
         if to_move:
-            os.makedirs(drained_dir, exist_ok=True)
+            g_makedirs(drained_dir)
             for p, name in to_move:
                 try:
-                    os.replace(str(p), str(drained_dir / name))
+                    g_replace(p, drained_dir / name)
                 except OSError:
                     pass
 
@@ -1737,7 +1868,7 @@ def read_events(project_id, *, root: str | None = None) -> list[dict]:
 
     log_path = events_log_path(project_id, root=root)
     if log_path.exists():
-        for line in log_path.read_text(encoding="utf-8").splitlines():
+        for line in g_read_text(log_path).splitlines():
             line = line.strip()
             if not line:
                 continue
@@ -1756,7 +1887,7 @@ def read_events(project_id, *, root: str | None = None) -> list[dict]:
 
     spool_dir = event_spool_dir(project_id, root=root)
     if spool_dir.is_dir():
-        for name in sorted(p.name for p in spool_dir.iterdir() if p.is_file() and p.name.endswith(".json")):
+        for name in sorted(p.name for p in g_iterdir(spool_dir) if p.is_file() and p.name.endswith(".json")):
             # Same bounded-retry reader as the drain: a briefly locked file (antivirus / OneDrive) must
             # not silently vanish from this view -- fail-task's DoubleFailure check depends on it.
             status, raw = _read_pending_text(spool_dir / name)
@@ -1868,6 +1999,8 @@ def emit_event(
     # happened and the caller sees EventCommitError (exit 5).
     try:
         spool_event(event, project_id, root=root)
+    except FrozenSeamError:
+        raise
     except Exception as exc:
         raise EventCommitError(f"failed to commit event to pending spool: {exc}") from exc
 
@@ -1877,6 +2010,8 @@ def emit_event(
     # persistent drain problem isn't silent.
     try:
         drain_event_spool(project_id, root=root, now=resolved_now)
+    except FrozenSeamError:
+        raise
     except Exception as exc:
         print(f"WARNING: drain_event_spool failed (event already committed to pending): {exc}", file=sys.stderr)
 

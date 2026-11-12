@@ -116,10 +116,11 @@ def _hash_artifact(path_str: str) -> dict:
         raise aaos.UsageError(
             f"artifact not found on disk, cannot compute manifest hash: {path_str}"
         )
-    data = path.read_bytes()
+    data = aaos.g_read_bytes(path)
     return {"path": path_str, "sha256": hashlib.sha256(data).hexdigest(), "bytes": len(data)}
 
 
+@aaos.freeze_exit
 def main(argv=None) -> int:
     args = build_arg_parser().parse_args(argv)
 
@@ -141,7 +142,7 @@ def main(argv=None) -> int:
             summary_path = Path(args.summary_file)
             if not summary_path.is_file():
                 raise aaos.UsageError(f"--summary-file not found: {args.summary_file}")
-            summary = summary_path.read_text(encoding="utf-8")
+            summary = aaos.g_read_text(summary_path)
         if summary is None:
             summary = ""
 

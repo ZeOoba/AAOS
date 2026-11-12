@@ -105,14 +105,14 @@ def _load_tasks(tasks_dir: Path):
     if not tasks_dir.is_dir():
         return rows_input, skipped, newest, file_count
 
-    for path in sorted(tasks_dir.glob("*.json")):
+    for path in sorted(aaos.g_glob(tasks_dir, "*.json")):
         file_count += 1
         mtime = _mtime_dt(path)
         if mtime is not None and (newest is None or mtime > newest):
             newest = mtime
 
         try:
-            raw = path.read_text(encoding="utf-8")
+            raw = aaos.g_read_text(path)
         except OSError as exc:
             skipped.append({"file": path.name, "reason": f"could not read file: {exc}"})
             continue
@@ -235,6 +235,7 @@ def build_arg_parser() -> argparse.ArgumentParser:
     return parser
 
 
+@aaos.freeze_exit
 def main(argv=None) -> int:
     args = build_arg_parser().parse_args(argv)
 

@@ -172,7 +172,7 @@ def _load_and_validate_registry(registry_src: Path) -> dict:
     if not registry_src.exists():
         raise aaos.UsageError(f"missing required source file: {registry_src}")
     try:
-        raw = registry_src.read_text(encoding="utf-8")
+        raw = aaos.g_read_text(registry_src)
     except OSError as exc:
         raise aaos.UsageError(f"could not read {registry_src}: {exc}") from exc
     try:
@@ -206,7 +206,7 @@ def _build_copy_plan(repo_root: Path, contracts_dir: Path) -> list[tuple[Path, P
         plan.append((docs_dir / name, contracts_dir / name))
 
     if templates_dir.is_dir():
-        for tf in sorted(p for p in templates_dir.iterdir() if p.is_file()):
+        for tf in sorted(p for p in aaos.g_iterdir(templates_dir) if p.is_file()):
             plan.append((tf, contracts_dir / "templates" / tf.name))
     else:
         # templates/ itself missing is a missing-required-source-file
@@ -217,6 +217,7 @@ def _build_copy_plan(repo_root: Path, contracts_dir: Path) -> list[tuple[Path, P
     return plan
 
 
+@aaos.freeze_exit
 def main(argv=None) -> int:
     args = build_arg_parser().parse_args(argv)
     repo_root = REPO_ROOT  # re-read the module global at call time (tests monkeypatch it)
@@ -236,6 +237,8 @@ def main(argv=None) -> int:
 
     try:
         contracts_dir = aaos.guard_path(seam_root / "contracts", "contracts dir")
+        if contracts_dir.is_dir():
+            aaos.g_walk(contracts_dir)  # screen every mirror entry up front: a junction anywhere in it refuses the run
     except aaos.UsageError as exc:
         print(f"USAGE ERROR: {exc}", file=sys.stderr)
         return 2
@@ -271,10 +274,10 @@ def main(argv=None) -> int:
     # Probe S correctly fails closed instead of trusting stale bytes.
     published_path = contracts_dir / "PUBLISHED.json"
     if published_path.exists():
-        published_path.unlink()
+        aaos.g_unlink(published_path)
 
     for src, dest in plan:
-        aaos.atomic_write(dest, src.read_bytes())
+        aaos.atomic_write(dest, aaos.g_read_bytes(src))
 
     published = {
         "protocol_version": "1.0",

@@ -323,6 +323,7 @@ class NestedJunctionTests(_DecoyCase):
 
     def _junction(self, link: Path, target: Path):
         link.parent.mkdir(parents=True, exist_ok=True)
+        target.mkdir(parents=True, exist_ok=True)
         proc = subprocess.run(["cmd", "/c", "mklink", "/J", str(link), str(target)], capture_output=True)
         if proc.returncode != 0 or not link.exists():
             self.skipTest("cannot create a junction on this host")
@@ -423,8 +424,120 @@ class NestedJunctionTests(_DecoyCase):
                                  "--source-commit", "0" * 40)
 
     def test_publish_notion_default_in_through_junctioned_projects_is_refused(self):
+        """And it is guard_path (via project_dir) that refuses -- not some later check."""
         self._junction(self.fake / "projects", self.decoy / "projects")
-        self._assert_cli_refused("publish-notion.py", "--seam-root", str(self.fake), *self.NOW)
+        raised = []
+        real = aaos.guard_path
+
+        def spy(path, label="derived seam path"):
+            try:
+                return real(path, label)
+            except aaos.UsageError as exc:
+                raised.append((label, exc))
+                raise
+
+        with mock.patch.object(aaos, "guard_path", side_effect=spy):
+            self._assert_cli_refused("publish-notion.py", "--seam-root", str(self.fake), *self.NOW)
+        self.assertTrue(raised, "guard_path never refused")
+        self.assertEqual(raised[0][0], "project dir")
+        self.assertIsInstance(raised[0][1], aaos.FrozenSeamError)
+
+    # ---- round-3 review probes (a), (b), (c), (d): junction BELOW a derived directory ----
+
+    def _assert_failed_closed(self, steps):
+        """steps: list of (tool, argv). At least one must refuse with FROZEN (exit 2); none may
+        exit with a traceback-style 1; and the decoy must be unchanged at the end."""
+        results = [(name, *self._run(name, *argv)) for name, argv in steps]
+        self.assertTrue(any(code == 2 and "FROZEN" in out for _n, code, out in results), results)
+        self.assertEqual(self._snapshot(), self.baseline, "nothing may be written under the live seam")
+        return results
+
+    def test_probe_a_publish_contracts_with_junctioned_contracts_schemas(self):
+        (self.fake / "contracts").mkdir()
+        self._junction(self.fake / "contracts" / "schemas", self.decoy / "contracts" / "schemas")
+        self.baseline = self._snapshot()
+        self._assert_cli_refused("publish-contracts.py", "--seam-root", str(self.fake), "--source-commit", "0" * 40)
+
+    def test_probe_b_lifecycle_with_junctioned_lock_archive(self):
+        locks = self.fake / "projects" / "ora-ops" / "locks"
+        locks.mkdir(parents=True)
+        self._junction(locks / "_archive", self.decoy / "projects" / "ora-ops" / "locks" / "_archive")
+        self.baseline = self._snapshot()
+        common = ("--seam-root", str(self.fake), *self.NOW)
+        results = self._assert_failed_closed([
+            ("create-task.py", ["--id", "t-probe-b", "--title", "synthetic", "--accept", "x", *common]),
+            ("lease-task.py", ["t-probe-b", "--holder", "claude-code", "--session", "s1", "--settle-sec", "0", *common]),
+            ("complete-task.py", ["t-probe-b", "--holder", "claude-code", "--session", "s1",
+                                  "--evidence", "label=a", "ref=b", *common]),
+        ])
+        self.assertNotEqual(results[-1][1], 0, "complete-task must not succeed through a junctioned _archive")
+
+    def test_probe_b_archive_lock_unit(self):
+        locks = self.fake / "projects" / "ora-ops" / "locks"
+        locks.mkdir(parents=True)
+        self._junction(locks / "_archive", self.decoy / "projects" / "ora-ops" / "locks" / "_archive")
+        lock = locks / "t-synthetic.lock"
+        lock.write_text("{}", encoding="utf-8")
+        self.baseline = self._snapshot()
+        with self.assertRaises(aaos.FrozenSeamError):
+            aaos.archive_lock(lock)
+        self.assertTrue(lock.exists(), "the lock must not have moved")
+        self.assertEqual(self._snapshot(), self.baseline)
+        with self.assertRaises(aaos.FrozenSeamError):
+            aaos.lock_archive_dir("ora-ops", root=str(self.fake))
+
+    def test_probe_c_check_contract_drift_does_not_read_through_junction(self):
+        (self.decoy / "contracts" / "schemas").mkdir(parents=True, exist_ok=True)
+        (self.decoy / "contracts" / "schemas" / "LIVE-SECRET.json").write_text("live", encoding="utf-8")
+        (self.fake / "contracts").mkdir()
+        self._junction(self.fake / "contracts" / "schemas", self.decoy / "contracts" / "schemas")
+        self.baseline = self._snapshot()
+        code, output = self._run("check-contract-drift.py", "--seam-root", str(self.fake), "--source-commit", "0" * 40)
+        self.assertEqual(code, 2, output)
+        self.assertIn("FROZEN", output)
+        self.assertNotIn("LIVE-SECRET", output)
+
+    def test_probe_c_drift_with_published_mirror_and_junctioned_schemas(self):
+        """Realistic shape: a real published mirror whose schemas/ was swapped for a junction."""
+        code, output = self._run("publish-contracts.py", "--seam-root", str(self.fake), "--source-commit", "0" * 40)
+        self.assertEqual(code, 0, output)
+        import shutil as _sh
+        _sh.rmtree(str(self.fake / "contracts" / "schemas"))
+        (self.decoy / "contracts" / "schemas").mkdir(parents=True, exist_ok=True)
+        (self.decoy / "contracts" / "schemas" / "LIVE-SECRET.json").write_text("live", encoding="utf-8")
+        self._junction(self.fake / "contracts" / "schemas", self.decoy / "contracts" / "schemas")
+        self.baseline = self._snapshot()
+        code, output = self._run("check-contract-drift.py", "--seam-root", str(self.fake), "--source-commit", "0" * 40)
+        self.assertEqual(code, 2, output)
+        self.assertIn("FROZEN", output)
+        self.assertNotIn("LIVE-SECRET", output)
+        self.assertEqual(self._snapshot(), self.baseline)
+
+    def test_probe_d_contracts_templates_junction(self):
+        (self.decoy / "contracts" / "templates").mkdir(parents=True, exist_ok=True)
+        (self.decoy / "contracts" / "templates" / "LIVE-ONLY.txt").write_text("live", encoding="utf-8")
+        (self.fake / "contracts").mkdir()
+        self._junction(self.fake / "contracts" / "templates", self.decoy / "contracts" / "templates")
+        self.baseline = self._snapshot()
+        for tool in ("publish-contracts.py", "check-contract-drift.py"):
+            with self.subTest(tool=tool):
+                code, output = self._run(tool, "--seam-root", str(self.fake), "--source-commit", "0" * 40)
+                self.assertEqual(code, 2, output)
+                self.assertIn("FROZEN", output)
+                self.assertNotIn("LIVE-ONLY", output)
+                self.assertEqual(self._snapshot(), self.baseline)
+
+    def test_deep_junction_in_spool_drained_dir(self):
+        """emit-event: a junction at events/aaos-events.ndjson.pending/_drained (the drain's move target)."""
+        spool = self.fake / "projects" / "ora-ops" / "events" / "aaos-events.ndjson.pending"
+        spool.mkdir(parents=True)
+        self._junction(spool / "_drained", self.decoy / "projects" / "ora-ops" / "events")
+        self.baseline = self._snapshot()
+        code, output = self._run("emit-event.py", "--type", "TaskCreated", "--actor", "claude-code",
+                                 "--task", "t-synthetic", "--seam-root", str(self.fake), *self.NOW)
+        self.assertEqual(code, 2, output)
+        self.assertIn("FROZEN", output)
+        self.assertEqual(self._snapshot(), self.baseline)
 
 
 if __name__ == "__main__":

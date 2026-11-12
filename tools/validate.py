@@ -166,7 +166,7 @@ def load_registry(registry_path: Path):
     """Load and return the agent registry JSON. Raises OSError/JSONDecodeError
     on failure — the caller (main(), for the only schema that needs a
     registry: "handoff") turns that into a usage error (exit 2)."""
-    with open(registry_path, encoding="utf-8") as fh:
+    with _aaos.g_open(registry_path, encoding="utf-8") as fh:
         return json.load(fh)
 
 
@@ -433,6 +433,7 @@ def build_arg_parser() -> argparse.ArgumentParser:
     return parser
 
 
+@_aaos.freeze_exit
 def main(argv=None) -> int:
     args = build_arg_parser().parse_args(argv)
 
@@ -463,7 +464,7 @@ def main(argv=None) -> int:
 
     schema_path = schema_dir / SCHEMA_FILES[schema_name]
     try:
-        schema = json.loads(schema_path.read_text(encoding="utf-8"))
+        schema = json.loads(_aaos.g_read_text(schema_path))
     except (OSError, json.JSONDecodeError) as exc:
         print(f"USAGE ERROR: could not load schema '{schema_path}': {exc}")
         return 2
@@ -471,7 +472,7 @@ def main(argv=None) -> int:
     validator = Draft202012Validator(schema)
 
     try:
-        raw_text = target.read_text(encoding="utf-8")
+        raw_text = _aaos.g_read_text(target)
     except OSError as exc:
         print(f"USAGE ERROR: could not read '{target}': {exc}")
         return 2
