@@ -72,6 +72,7 @@ def build_arg_parser() -> argparse.ArgumentParser:
     return parser
 
 
+@aaos.freeze_exit
 def main(argv=None) -> int:
     args = build_arg_parser().parse_args(argv)
 

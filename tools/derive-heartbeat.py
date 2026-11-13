@@ -88,7 +88,7 @@ def _read_signals_text(signals_arg: str) -> str:
         return sys.stdin.read()
     path = Path(signals_arg)
     try:
-        return path.read_text(encoding="utf-8")
+        return aaos.g_read_text(path)
     except OSError as exc:
         raise aaos.UsageError(f"could not read --signals file '{path}': {exc}") from exc
 
@@ -267,8 +267,17 @@ def build_arg_parser() -> argparse.ArgumentParser:
     return parser
 
 
+@aaos.freeze_exit
 def main(argv=None) -> int:
     args = build_arg_parser().parse_args(argv)
+
+    # Freeze sentinel (ADR-0007 addendum 2026-11-12): every file-path argument, not only the seam
+    # root, is refused if it is or lies under the live seam -- before any read or write.
+    try:
+        aaos.refuse_frozen_live_paths([(args.signals, "--signals"), (args.out, "--out")])
+    except aaos.UsageError as exc:
+        print(f"USAGE ERROR: {exc}")
+        return 2
 
     if args.now:
         try:
@@ -288,6 +297,8 @@ def main(argv=None) -> int:
 
     try:
         registry = aaos.load_registry()
+    except aaos.FrozenSeamError:
+        raise  # freeze_exit reports it (exit 2, FROZEN), not as a generic registry failure
     except Exception as exc:  # noqa: BLE001 -- any registry-load failure is a usage error
         print(f"USAGE ERROR: could not load agent registry: {exc}")
         return 2

@@ -105,14 +105,14 @@ def _load_tasks(tasks_dir: Path):
     if not tasks_dir.is_dir():
         return rows_input, skipped, newest, file_count
 
-    for path in sorted(tasks_dir.glob("*.json")):
+    for path in sorted(aaos.g_glob(tasks_dir, "*.json")):
         file_count += 1
         mtime = _mtime_dt(path)
         if mtime is not None and (newest is None or mtime > newest):
             newest = mtime
 
         try:
-            raw = path.read_text(encoding="utf-8")
+            raw = aaos.g_read_text(path)
         except OSError as exc:
             skipped.append({"file": path.name, "reason": f"could not read file: {exc}"})
             continue
@@ -235,8 +235,17 @@ def build_arg_parser() -> argparse.ArgumentParser:
     return parser
 
 
+@aaos.freeze_exit
 def main(argv=None) -> int:
     args = build_arg_parser().parse_args(argv)
+
+    # Freeze sentinel (ADR-0007 addendum 2026-11-12): every file-path argument, not only the seam
+    # root, is refused if it is or lies under the live seam -- before any read or write.
+    try:
+        aaos.refuse_frozen_live_paths([(args.out, "--out")])
+    except aaos.UsageError as exc:
+        print(f"USAGE ERROR: {exc}")
+        return 2
 
     if args.now:
         try:
@@ -258,7 +267,11 @@ def main(argv=None) -> int:
         print(f"USAGE ERROR: {exc}")
         return 2
 
-    tasks_dir = project_dir / "tasks"
+    try:
+        tasks_dir = aaos.guard_path(project_dir / "tasks", "tasks dir")
+    except aaos.UsageError as exc:
+        print(f"USAGE ERROR: {exc}")
+        return 2
     events_path = aaos.events_log_path(args.project, root=args.seam_root)
     hb_path = aaos.heartbeat_path(root=args.seam_root)
 

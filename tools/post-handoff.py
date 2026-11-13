@@ -116,15 +116,21 @@ def _hash_artifact(path_str: str) -> dict:
         raise aaos.UsageError(
             f"artifact not found on disk, cannot compute manifest hash: {path_str}"
         )
-    data = path.read_bytes()
+    data = aaos.g_read_bytes(path)
     return {"path": path_str, "sha256": hashlib.sha256(data).hexdigest(), "bytes": len(data)}
 
 
+@aaos.freeze_exit
 def main(argv=None) -> int:
     args = build_arg_parser().parse_args(argv)
 
     try:
         resolved_now = _resolve_now(args.now)
+        # Freeze sentinel (ADR-0007 addendum 2026-11-12): file arguments too, before any I/O.
+        aaos.refuse_frozen_live_paths(
+            [(args.summary_file, "--summary-file"), (args.registry, "--registry")]
+            + [(_parse_kv_args(tok, ("path",))["path"], "--artifact") for tok in (args.artifact or [])]
+        )
         aaos.require_seam_reachable(args.seam_root)
         if args.blocker and not (args.holder and args.session):
             raise aaos.UsageError(
@@ -136,7 +142,7 @@ def main(argv=None) -> int:
             summary_path = Path(args.summary_file)
             if not summary_path.is_file():
                 raise aaos.UsageError(f"--summary-file not found: {args.summary_file}")
-            summary = summary_path.read_text(encoding="utf-8")
+            summary = aaos.g_read_text(summary_path)
         if summary is None:
             summary = ""
 

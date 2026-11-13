@@ -101,6 +101,7 @@ def _build_task_id(args, now) -> str:
     return raw
 
 
+@aaos.freeze_exit
 def main(argv=None) -> int:
     args = build_arg_parser().parse_args(argv)
 
