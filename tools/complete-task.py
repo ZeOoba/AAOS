@@ -98,6 +98,7 @@ def _archive_task(task, args, resolved_now):
     )
 
 
+@aaos.freeze_exit
 def main(argv=None) -> int:
     args = build_arg_parser().parse_args(argv)
 

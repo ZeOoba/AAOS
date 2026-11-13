@@ -118,7 +118,7 @@ AAOS/
 ├── requirements.txt           jsonschema>=4.18 (the only third-party dependency)
 ├── schemas/                   5 JSON Schemas (draft 2020-12), each with protocol_version "1.0"
 ├── tools/                     _aaos_common.py shared library + 13 CLI scripts (all logic lives here)
-├── tests/                     unittest suite (22 test modules), helpers, fixtures/
+├── tests/                     unittest suite (24 test modules), helpers, fixtures/
 ├── templates/                 task/handoff JSON templates; ADR, gate-review, BUILD-STATE markdown templates
 ├── examples/                  2 schema-valid samples (t-sample-001.json, h-sample-001.json)
 ├── docs/
@@ -190,7 +190,7 @@ Every queue script accepts `--project` (default `ora-ops`), `--seam-root` and `-
 |---|---|---|
 | `derive-heartbeat.py` | Build `heartbeat.json` from a signals file that was already fetched. It only computes from local files. | `--signals <path or ->` (required), `--out`, `--now`, `--seam-root` |
 | `project-notion.py` | Build the local Notion payload from tasks, events and the heartbeat. Writes `projects/<project>/notion-projection.json`. | `--project`, `--out`, `--now`, `--seam-root` |
-| `publish-notion.py` | POST that payload to Notion as a dated child page, using stdlib `urllib`. Needs `NOTION_TOKEN` unless `--dry-run` is given. | `--project`, `--in`, `--parent-page-id`, `--seam-root`, `--dry-run`, `--now` |
+| `publish-notion.py` | POST that payload to Notion as a dated child page, using stdlib `urllib`. Dry-run by default. `--live` needs `AAOS_NOTION_TOKEN` (the generic `NOTION_TOKEN` is not read), `AAOS_HASH_KEY` and, while frozen, `AAOS_UNFREEZE=1`. Task ids and titles are always sent as keyed `hmac:` tags. | `--project`, `--in`, `--parent-page-id`, `--seam-root`, `--dry-run`, `--live`, `--now` |
 
 `_aaos_common.py` is a library, not a CLI. It provides path helpers, `atomic_write`, `acquire_lease`, `commit_state_change`, `assert_lease_held`, `reclaim_decision`, `emit_event`, `spool_event`, `drain_event_spool`, `read_events`, `match_write_scope` and `validate_obj`.
 
@@ -207,7 +207,7 @@ The seven queue and lifecycle scripts share one exit-code contract. Unexpected e
 | `4` | Lease lost (CONTESTED) | A rival lock or conflict copy found during settle, or the lease expired before commit |
 | `5` | Event-commit failure | The spool write failed, so the state change was rolled back |
 
-The other scripts use a smaller set. `validate.py`, `publish-contracts.py` and `derive-heartbeat.py` return 0, 1 (invalid) or 2 (usage). `check-contract-drift.py` returns 0 (clean), 1 (drift) or 2 (usage). `publish-notion.py` returns 0, 1 (the Notion API call failed) or 2 (usage, or `NOTION_TOKEN` missing). `project-notion.py` returns 0 or 2.
+The other scripts use a smaller set. `validate.py`, `publish-contracts.py` and `derive-heartbeat.py` return 0, 1 (invalid) or 2 (usage). `check-contract-drift.py` returns 0 (clean), 1 (drift) or 2 (usage). `publish-notion.py` returns 0, 1 (the Notion API call failed) or 2 (usage, or a missing `--live` credential). `project-notion.py` returns 0 or 2.
 
 ## Schemas
 
@@ -229,7 +229,7 @@ Lock files and drain-lock files have no schema. Their fields are checked in code
 python -m unittest discover -s tests -p "test_*.py"
 ```
 
-**375 tests, all passing** (verified 2026-11-10 on Windows, Python 3.13, `jsonschema` 4.26, about 60 s). The suite covers:
+**456 tests, all passing** (verified 2026-11-12 on Windows, Python 3.13, `jsonschema` 4.26, about 40 s). The suite covers:
 
 - the queue scripts and an end-to-end lifecycle
 - event-log concurrency and drain-lock interleaving
@@ -237,7 +237,8 @@ python -m unittest discover -s tests -p "test_*.py"
 - Windows filesystem semantics and ISO-8601 portability (including the Python 3.10 `Z`-suffix normaliser)
 - bounds on CLI input
 - the contract publisher and drift checker
-- the heartbeat and Notion projections
+- the heartbeat and Notion projections, including `publish-notion` redaction and its live gates
+- the ADR-0007 freeze guard, plus a static test that every filesystem call in `tools/` goes through the guarded primitives
 
 Five tests, covering four known defects, carry a strict `@known_defect` marker ([`tests/_known_defect.py`](tests/_known_defect.py)). Each one passes with a `KNOWN DEFECT` warning while the bug is still there, and fails once the bug is fixed, so the marker has to be removed (see [limitations](#status-and-known-limitations)).
 
@@ -256,7 +257,8 @@ Under the freeze, CI runs only when someone triggers `workflow_dispatch`.
 |---|---|---|
 | Seam root | `--seam-root`, then the `AAOS_SEAM_ROOT` env var, then `DEFAULT_SEAM_ROOT` in `tools/_aaos_common.py` | The built-in default is the operator's OneDrive-synced `Claude_Workspace/AAOS` folder. Off that machine, always set `--seam-root` or `AAOS_SEAM_ROOT`. Queue scripts fail with exit 2 if the root does not exist. |
 | Project | `--project` (default `ora-ops`) | Must match `^[a-z][a-z0-9-]*$`. |
-| `NOTION_TOKEN` | env var | Used only by `publish-notion.py`. Not needed with `--dry-run`. Never commit it: `.gitignore` excludes `*.env*` and `*credentials*`. |
+| `AAOS_NOTION_TOKEN`, `AAOS_HASH_KEY` | env vars | Used only by `publish-notion.py --live`; `AAOS_HASH_KEY` keys the `hmac:` redaction (16+ characters). Never commit them: `.gitignore` excludes `*.env*` and `*credentials*`. |
+| `AAOS_UNFREEZE` | env var | While ADR-0007 stands, every tool refuses (exit 2, `FROZEN`) any path at or under the live seam unless this is `1`. Tests and copies of the seam are unaffected. |
 | Notion parent page | `--parent-page-id` | Defaults to the operator's Ops Hub page. |
 | Lease timing | `--ttl-min`, `--skew-min`, `--settle-sec` | Defaults are 45 min, 5 min and 30 s (AAOS-SPEC §7). Inputs are bounds-checked. |
 
