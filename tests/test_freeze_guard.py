@@ -61,6 +61,20 @@ def _make_dir_link(link: Path, target: Path) -> bool:
     return False
 
 
+def _remove_dir_link(link: Path) -> None:
+    """Remove a directory symlink or junction without touching its target.
+
+    POSIX symlinks need unlink (rmdir raises NotADirectoryError); Windows
+    junctions and directory symlinks need rmdir."""
+    p = str(link)
+    if not os.path.lexists(p):
+        return
+    if os.name != "nt" and os.path.islink(p):
+        os.unlink(p)
+    else:
+        os.rmdir(p)
+
+
 class _DecoyCase(unittest.TestCase):
     """tmp dir with a decoy live seam (a folder whose name has a space, so it has an 8.3 alias)."""
 
@@ -163,7 +177,7 @@ class FreezeGuardTests(_DecoyCase):
         link = self.tmp / "alias"
         if not _make_dir_link(link, self.decoy):
             self.skipTest("cannot create a symlink or junction on this host")
-        self.addCleanup(lambda: os.rmdir(str(link)) if link.exists() else None)
+        self.addCleanup(_remove_dir_link, link)
         self._refused(lambda: aaos.seam_root(str(link)))
         self._refused(lambda: aaos.refuse_frozen_live_path(str(link / "heartbeat.json"), "--out"))
 
@@ -390,7 +404,7 @@ class GuardHardeningTests(_DecoyCase):
         alias = self.tmp / "alias-root"
         if not _make_dir_link(alias, real):
             self.skipTest("cannot create a symlink or junction on this host")
-        self.addCleanup(lambda: os.rmdir(str(alias)) if os.path.lexists(str(alias)) else None)
+        self.addCleanup(_remove_dir_link, alias)
         with mock.patch.object(aaos, "LIVE_SEAM_ROOT", str(alias / "AAOS")):
             for p in (real / "AAOS", real / "AAOS" / "projects", real / "AAOS" / "no-such" / "x.json"):
                 with self.subTest(p=str(p)):
@@ -453,7 +467,7 @@ class NestedJunctionTests(_DecoyCase):
         proc = subprocess.run(["cmd", "/c", "mklink", "/J", str(link), str(target)], capture_output=True)
         if proc.returncode != 0 or not link.exists():
             self.skipTest("cannot create a junction on this host")
-        self.addCleanup(lambda: os.rmdir(str(link)) if os.path.lexists(str(link)) else None)
+        self.addCleanup(_remove_dir_link, link)
 
     def _refused(self, fn):
         with self.assertRaises(aaos.UsageError) as ctx:
